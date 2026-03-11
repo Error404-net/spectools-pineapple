@@ -12,6 +12,7 @@
 - `payloads/spectools_waterfall/payload.sh`
   - Pager-compatible launcher with lock/pid/trap lifecycle handling.
   - Performs preflight checks, source selection, and start/stop orchestration.
+  - Streams live bridge output to the renderer via FIFO so the waterfall is shown in real time (waterfall/stats modes).
 - `bridge/fixtures/spectool_raw_sample.log`
   - Replay fixture for local testing.
 - `config/spectools_bridge.conf`
@@ -45,3 +46,7 @@ Run payload launcher directly:
 ```bash
 ./payloads/spectools_waterfall/payload.sh
 ```
+
+## Live waterfall behavior
+
+From the payload, pressing **A** now starts the bridge and opens the renderer in the foreground so you can see a live ANSI waterfall. Exit live view with `q`/`b` in the renderer, then the payload returns to setup controls.
