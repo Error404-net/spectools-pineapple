@@ -25,7 +25,6 @@ SOURCE_COMMAND="spectool_raw"
 MODE="waterfall"
 BRIDGE_PID=""
 RENDER_PID=""
-STREAM_FIFO="/tmp/spectools_waterfall_stream.$$"
 
 log_msg() {
 	if command -v LOG >/dev/null 2>&1; then
@@ -74,7 +73,7 @@ cleanup() {
 	[ -n "$RENDER_PID" ] && kill "$RENDER_PID" 2>/dev/null || true
 	[ -n "$BRIDGE_PID" ] && kill "$BRIDGE_PID" 2>/dev/null || true
 	pkill -f "spectools_bridge.py" 2>/dev/null || true
-	rm -f "$LOCK_FILE" "$PID_FILE" "$STREAM_FIFO"
+	rm -f "$LOCK_FILE" "$PID_FILE"
 }
 trap cleanup EXIT INT TERM
 
@@ -112,33 +111,25 @@ pick_source() {
 
 start_scan() {
 	led_state ATTACK
-	log_msg "Starting bridge + renderer"
-	rm -f "$STREAM_FIFO"
-	mkfifo "$STREAM_FIFO" || {
-		led_state FAIL
-		dialog_msg "Failed to create stream fifo"
-		return 1
-	}
-
+	log_msg "Starting bridge"
 	"$BRIDGE_BIN" \
 		--input-command "$SOURCE_COMMAND" \
 		--events-file "$EVENTS_FILE" \
-		--export-dir "$SESSION_DIR" > "$STREAM_FIFO" 2>> "$LOG_FILE" &
+		--export-dir "$SESSION_DIR" >> "$LOG_FILE" 2>&1 &
 	BRIDGE_PID=$!
 	sleep 1
 	if ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
 		led_state FAIL
 		dialog_msg "Bridge failed to start"
-		rm -f "$STREAM_FIFO"
 		return 1
 	fi
 
-	log_msg "Bridge started pid=${BRIDGE_PID}; renderer mode=${MODE}"
-	"$RENDER_BIN" --start-mode "$MODE" --snapshot-dir "$SESSION_DIR" < "$STREAM_FIFO"
-	rc=$?
-	log_msg "Renderer exited rc=${rc}"
-	rm -f "$STREAM_FIFO"
-	return "$rc"
+	log_msg "Bridge started pid=${BRIDGE_PID}; starting renderer mode=${MODE}"
+	"$RENDER_BIN" --input-file "$EVENTS_FILE" --snapshot-dir "$SESSION_DIR" >> "$LOG_FILE" 2>&1 &
+	RENDER_PID=$!
+	wait "$RENDER_PID"
+	RENDER_PID=""
+	return 0
 }
 
 stop_scan() {
@@ -177,6 +168,8 @@ main_loop() {
 			C|c)
 				if [ "$MODE" = "waterfall" ]; then
 					MODE="stats"
+				elif [ "$MODE" = "stats" ]; then
+					MODE="peak-hold"
 				else
 					MODE="waterfall"
 				fi

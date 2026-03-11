@@ -28,7 +28,7 @@ RESET = "\x1b[0m"
 class Renderer:
     def __init__(self, args: argparse.Namespace):
         self.args = args
-        self.mode = args.start_mode
+        self.mode = "waterfall"
         self.state = "INITIALIZING"
         self.rows: Deque[List[int]] = deque(maxlen=args.ring_depth)
         self.latest: Optional[dict] = None
@@ -186,7 +186,6 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--fps", type=int, default=6)
     p.add_argument("--downsample", choices=["max", "avg"], default="max")
     p.add_argument("--snapshot-dir", default="")
-    p.add_argument("--start-mode", choices=["waterfall", "stats"], default="waterfall")
     return p
 
 
