@@ -18,6 +18,7 @@ Als
 - `wifipineapplepager-payloads-master/` — payload scaffolding; includes the Pager-ready payload in `library/user/reconnaissance/spectools_net/`.
 - `99-wispy.rules` — example udev rules for USB access when running on desktop Linux.
 - `AGENTS.md` — contributor quick-start guide.
+- 'tod.md' - where tasks are to be planned and implimented.
 
 ---
 

@@ -55,7 +55,7 @@ Enable simple, repeatable installation of SpecTools binaries using the Pager’s
 ### Waterfall Viewer Payload
 
 **Purpose**
-Provide a visual RF waterfall display similar to observation/monitoring screens, accessible as a standalone payload script.
+Provide a visual RF waterfall display similar to observation/monitoring screens, accessible as a standalone payload script. This should look like the recon screen.
 
 **Workflow**
 
