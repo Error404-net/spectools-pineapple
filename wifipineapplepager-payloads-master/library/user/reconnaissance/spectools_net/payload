@@ -1,0 +1,95 @@
+#!/bin/bash
+# Spectools Pineapple Pager payload
+# Usage: ./payload [start|stop|status]
+
+set -e
+
+BIN_NET=${BIN_NET:-/usr/bin/spectool_net}
+BIN_RAW=${BIN_RAW:-/usr/bin/spectool_raw}
+LOG_FILE=${LOG_FILE:-/tmp/spectools_net.log}
+PID_FILE=${PID_FILE:-/tmp/spectools_net.pid}
+NET_PORT=${SPECTOOL_NET_PORT:-30569}
+NET_FLAGS=${SPECTOOL_NET_FLAGS:-}
+
+log() {
+	printf '[spectools] %s\n' "$1" | tee -a "$LOG_FILE"
+	command -v logger >/dev/null 2>&1 && logger -t spectools-payload "$1"
+}
+
+ensure_binary() {
+	local bin="$1"
+	if [ ! -x "$bin" ]; then
+		log "Missing executable: $bin"
+		exit 1
+	fi
+}
+
+start_payload() {
+	ensure_binary "$BIN_NET"
+	ensure_binary "$BIN_RAW"
+
+	if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+		log "spectool_net already running (PID $(cat "$PID_FILE"))"
+		return 0
+	fi
+
+	log "Verifying attached spectools devices"
+	if ! "$BIN_RAW" --list >>"$LOG_FILE" 2>&1; then
+		log "spectool_raw --list failed; check USB permissions"
+		return 1
+	fi
+
+	log "Starting spectool_net on port $NET_PORT"
+	nohup "$BIN_NET" --port "$NET_PORT" $NET_FLAGS >>"$LOG_FILE" 2>&1 &
+	echo $! >"$PID_FILE"
+	log "spectool_net listening (PID $(cat "$PID_FILE"))"
+}
+
+stop_payload() {
+	if [ ! -f "$PID_FILE" ]; then
+		log "No PID file present; spectool_net not running?"
+		return 0
+	fi
+
+	local pid
+	pid=$(cat "$PID_FILE")
+	if kill -0 "$pid" 2>/dev/null; then
+		log "Stopping spectool_net (PID $pid)"
+		kill "$pid"
+		wait "$pid" 2>/dev/null || true
+	else
+		log "spectool_net process $pid not found"
+	fi
+	rm -f "$PID_FILE"
+}
+
+status_payload() {
+	if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+		log "spectool_net running (PID $(cat "$PID_FILE"))"
+	else
+		log "spectool_net is not running"
+	fi
+
+	if command -v ss >/dev/null 2>&1; then
+		ss -ntlp | grep spectool_net || true
+	elif command -v netstat >/dev/null 2>&1; then
+		netstat -ntlp | grep spectool_net || true
+	fi
+}
+
+ACTION=${1:-start}
+case "$ACTION" in
+	start)
+		start_payload
+		;;
+	stop)
+		stop_payload
+		;;
+	status)
+		status_payload
+		;;
+	*)
+		echo "Usage: $0 {start|stop|status}" >&2
+		exit 1
+		;;
+esac

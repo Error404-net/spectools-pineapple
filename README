@@ -1,32 +1,79 @@
 Spectools-pineapple
 --------------
 
-
 # Spectools Pineapple Pager Port
 
 This project is a fork of caljorden/spectools and adapted to run on the **Hak5 WiFi Pineapple Pager** platform.
 
-The goal of this repository is to modernize and package the original tool so it can be used as a **payload on the Pineapple Pager**, enabling wireless analysis functionality directly from the device's payload interface. with a modern ui.
+The goal of this repository is to modernize and package the original tool so it can be used as a **payload on the Pineapple Pager**, enabling wireless analysis functionality directly from the device's payload interface with a modern UI where available.
+
+Als
 
 ---
 
-## Background
+## Repository Layout
 
-The **WiFi Pineapple Pager** is a portable penetration testing platform developed by Hak5. It runs a Linux-based environment and supports user-created **payloads** that extend the device with additional tools and functionality. :contentReference[oaicite:0]{index=0}  
-
-Payloads can integrate command-line utilities, scripts, and web interfaces that run directly on the Pager.
-
-This project adapts legacy software so it can run natively within that payload ecosystem.
+- `spectool sourcecode/` — upstream spectools sources plus minimal Pineapple-specific patches.
+- `spectools-pineapple-build/` — prebuilt binaries, runtime libraries, and documentation for the Pineapple drop.
+- `wifipineapplepager-payloads-master/` — payload scaffolding; includes the Pager-ready payload in `library/user/reconnaissance/spectools_net/`.
+- `99-wispy.rules` — example udev rules for USB access when running on desktop Linux.
+- `AGENTS.md` — contributor quick-start guide.
 
 ---
 
-## Project Goals
+## Building the Pineapple Toolchain Drop
 
-- Port legacy software to the **Pineapple Pager architecture**
-- Provide **cross-compiled binaries** compatible with the device
-- Integrate with the **payload framework**
-- Offer a **modernized UI or interface** for easier use
-- Package everything so it can be deployed as a standard Pager payload
+1. Download the matching OpenWrt SDK for Pineapple Pager **24.10.1** (ramips/mt76x8, `mipsel_24kc`). Set `SDK_ROOT` to its unpacked path.
+2. Export toolchain paths:
+   ```bash
+   export STAGING_DIR="$SDK_ROOT/staging_dir"
+   export PATH="$STAGING_DIR/toolchain-mipsel_24kc_gcc-14.3.0_musl/bin:$PATH"
+   ```
+3. From this repo, configure spectools for the target:
+   ```bash
+   cd "spectool sourcecode"
+   ./configure --host=mipsel-openwrt-linux-musl --prefix=/usr --disable-gtk --disable-curses
+   ```
+4. Build and strip the binaries:
+   ```bash
+   make -j$(nproc)
+   $STAGING_DIR/toolchain-mipsel_24kc_gcc-14.3.0_musl/bin/mipsel-openwrt-linux-musl-strip spectool_raw spectool_net
+   ```
+5. Stage the install tree and refresh the drop folder:
+   ```bash
+   INSTALL_ROOT=$PWD/../spectools-pineapple-build/root
+   rm -rf "$INSTALL_ROOT"
+   make DESTDIR="$INSTALL_ROOT" install
+   rsync -a "$INSTALL_ROOT/usr/bin/" "$PWD/../spectools-pineapple-build/bin/"
+   rsync -a "$INSTALL_ROOT/usr/lib/" "$PWD/../spectools-pineapple-build/lib/"
+   ```
+   Copy any updated `libusb` artifacts from the SDK if they were rebuilt.
+6. Update `spectools-pineapple-build/README.md` with build metadata whenever the toolchain or target firmware changes.
+
+---
+
+## Installing on the Pineapple Pager
+
+The easiest path is to copy the prebuilt drop:
+```bash
+scp -r spectools-pineapple-build/bin root@pager:/usr/bin/
+scp -r spectools-pineapple-build/lib root@pager:/usr/lib/
+ssh root@pager "chmod +x /usr/bin/spectool_* && ldconfig"
+```
+Then validate USB access with `spectool_raw --list`. See `spectools-pineapple-build/README.md` for more troubleshooting tips.
+
+---
+
+## Pineapple Payload
+
+The payload directory `wifipineapplepager-payloads-master/library/user/reconnaissance/spectools_net/` contains a Pager-ready script. Copy that folder to your device (e.g. `/root/payloads/library/user/reconnaissance/`) and launch it from the Pineapple UI or CLI:
+```bash
+cd /root/payloads/library/user/reconnaissance/spectools_net
+./payload start      # start spectool_net in the background
+./payload status     # confirm the listener and USB devices
+./payload stop       # terminate the network server
+```
+Logs are written to `/tmp/spectools_net.log` by default so you can review the session.
 
 ---
 
@@ -34,8 +81,10 @@ This project adapts legacy software so it can run natively within that payload e
 
 - Cross-compiled binaries for the Pineapple Pager environment
 - Payload-compatible folder structure
-- Lightweight API / wrapper scripts to invoke the binaries
-- Optional web UI for easier interaction from the Pager interface
+- Lightweight shell wrappers to invoke the binaries from the Pager UI
+- Optional web UI components can still be built on desktop targets
 - Designed to run entirely on-device
 
-## This repo follows the authors original GPL license.
+## License
+
+This repo follows the authors' original GPL license.
