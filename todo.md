@@ -1,7 +1,8 @@
 ### Feature: Hak5 Pager Payload Installer & Waterfall Viewer
 
 **Overview**
-Design a payload-based installation and execution workflow tailored for the Hak5 Pager. The system should follow the standard Hak5 payload model: users upload files, navigate via hardware buttons, and execute scripts directly on-device.
+Design a payload-based installation and execution workflow tailored for the Hak5 Pager. The system should follow the standard Hak5 payload model: users upload files, navigate via hardware buttons, and execute scripts directly on-device. There should be a install script that copies the binaries over to the system. there should be a waterfall script that runs and displays the waterfall.
+we may need info on how themes are built as it may be a theme to properly display the waterfall in a manor similar to "Recon" and those screens. Alternativly if we need to create a new theme where an icon is next to Recon that states waterfall.
 
 ---
 
