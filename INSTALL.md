@@ -27,26 +27,22 @@ Live RF spectrum waterfall from a Wi-Spy DBx on the Hak5 WiFi Pineapple Pager.
 
 ## Step 1 — Upload the Payloads
 
-Unzip the package on your computer, then SCP both payload folders to the Pager:
+Unzip the package on your computer, then SCP the whole folder to the Pager:
 
 ```bash
-unzip spectools-pineapple-payload.zip
-cd spectools-pineapple-payload
-
-scp -r payloads/spectools_install \
-    root@pineapple:/root/payloads/user/reconnaissance/
-
-scp -r payloads/spectools_waterfall \
-    root@pineapple:/root/payloads/user/reconnaissance/
+unzip pine-spectools.zip
+scp -r pine-spectools root@pineapple:/root/payloads/user/
 ```
 
 After uploading, fix permissions:
 
 ```bash
 ssh root@pineapple "chmod 755 \
-    /root/payloads/user/reconnaissance/spectools_install/payload.sh \
-    /root/payloads/user/reconnaissance/spectools_waterfall/payload.sh \
-    /root/payloads/user/reconnaissance/spectools_waterfall/bin/*.py"
+    /root/payloads/user/pine-spectools/spectools_install/payload.sh \
+    /root/payloads/user/pine-spectools/spectools_waterfall/payload.sh \
+    /root/payloads/user/pine-spectools/spectools_waterfall/bin/*.py \
+    /root/payloads/user/pine-spectools/spectools_waterfall_graphical/payload.sh \
+    /root/payloads/user/pine-spectools/spectools_waterfall_graphical/bin/*.py"
 ```
 
 ---
@@ -55,7 +51,7 @@ ssh root@pineapple "chmod 755 \
 
 Plug in your Wi-Spy DBx via USB, then on the Pager:
 
-1. Navigate to **Payloads → user → reconnaissance → spectools_install**
+1. Navigate to **Payloads → user → pine-spectools → spectools_install**
 2. Select **payload.sh** and run it
 3. The payload log will show:
    ```
@@ -80,7 +76,7 @@ You only need to run this once per Pager.
 ## Step 3 — Run the Waterfall
 
 1. Make sure the Wi-Spy DBx is plugged into the Pager via USB
-2. On the Pager: navigate to **Payloads → user → reconnaissance → spectools_waterfall**
+2. On the Pager: navigate to **Payloads → user → pine-spectools → spectools_waterfall**
 3. Select **payload.sh** and run it
 
 ### What the display looks like
@@ -162,4 +158,4 @@ From the repo root:
 bash scripts/package.sh
 ```
 
-Produces `spectools-pineapple-payload.zip` in the repo root.
+Produces `pine-spectools.zip` in the repo root.

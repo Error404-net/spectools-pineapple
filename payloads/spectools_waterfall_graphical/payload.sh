@@ -33,8 +33,8 @@ cleanup() {
     pkill -f "spectools_waterfall_fb.py" 2>/dev/null || true
     # Give renderer a moment to re-enable vtcon itself
     sleep 0.3
-    # Restore vtcon in case renderer didn't
-    echo 1 > "$VTCON" 2>/dev/null || true
+    # Restore vtcon in case renderer didn't (path may not exist on all devices)
+    [ -e "$VTCON" ] && echo 1 > "$VTCON" 2>/dev/null || true
     [ -n "$BRIDGE_PID" ] && kill "$BRIDGE_PID" 2>/dev/null || true
     pkill -f "spectools_bridge.py" 2>/dev/null || true
     rm -f "$LOCK_FILE" "$PID_FILE" "$EVENTS_FILE"
