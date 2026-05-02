@@ -57,8 +57,8 @@ done
 UDEV="${REPO_ROOT}/99-wispy.rules"
 [ -f "$UDEV" ] && cp "$UDEV" "${STAGE_DIR}/payloads/spectools_install/99-wispy.rules"
 
-# ── Waterfall payload ─────────────────────────────────────────────────────────
-echo "Staging waterfall payload..."
+# ── Text waterfall payload ────────────────────────────────────────────────────
+echo "Staging text waterfall payload..."
 cp "${REPO_ROOT}/payloads/spectools_waterfall/payload.sh" \
    "${STAGE_DIR}/payloads/spectools_waterfall/payload.sh"
 chmod 755 "${STAGE_DIR}/payloads/spectools_waterfall/payload.sh"
@@ -70,6 +70,21 @@ cp "${REPO_ROOT}/payloads/spectools_waterfall/bin/spectools_waterfall_pager.py" 
 chmod 755 \
     "${STAGE_DIR}/payloads/spectools_waterfall/bin/spectools_bridge.py" \
     "${STAGE_DIR}/payloads/spectools_waterfall/bin/spectools_waterfall_pager.py"
+
+# ── Graphical waterfall payload ───────────────────────────────────────────────
+echo "Staging graphical waterfall payload..."
+mkdir -p "${STAGE_DIR}/payloads/spectools_waterfall_graphical/bin"
+cp "${REPO_ROOT}/payloads/spectools_waterfall_graphical/payload.sh" \
+   "${STAGE_DIR}/payloads/spectools_waterfall_graphical/payload.sh"
+chmod 755 "${STAGE_DIR}/payloads/spectools_waterfall_graphical/payload.sh"
+
+cp "${REPO_ROOT}/payloads/spectools_waterfall_graphical/bin/spectools_bridge.py" \
+   "${STAGE_DIR}/payloads/spectools_waterfall_graphical/bin/spectools_bridge.py"
+cp "${REPO_ROOT}/payloads/spectools_waterfall_graphical/bin/spectools_waterfall_fb.py" \
+   "${STAGE_DIR}/payloads/spectools_waterfall_graphical/bin/spectools_waterfall_fb.py"
+chmod 755 \
+    "${STAGE_DIR}/payloads/spectools_waterfall_graphical/bin/spectools_bridge.py" \
+    "${STAGE_DIR}/payloads/spectools_waterfall_graphical/bin/spectools_waterfall_fb.py"
 
 # ── Instructions ──────────────────────────────────────────────────────────────
 cp "${REPO_ROOT}/INSTALL.md" "${STAGE_DIR}/INSTALL.md"
