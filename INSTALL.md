@@ -27,22 +27,24 @@ Live RF spectrum waterfall from a Wi-Spy DBx on the Hak5 WiFi Pineapple Pager.
 
 ## Step 1 — Upload the Payloads
 
-Unzip the package on your computer, then SCP the whole folder to the Pager:
+Unzip the package on your computer, then SCP each payload into the `reconnaissance` category directory:
 
 ```bash
 unzip pine-spectools.zip
-scp -r pine-spectools root@pineapple:/root/payloads/user/
+scp -r pine-spectools/spectools_install         root@pineapple:/root/payloads/user/reconnaissance/
+scp -r pine-spectools/spectools_waterfall        root@pineapple:/root/payloads/user/reconnaissance/
+scp -r pine-spectools/spectools_waterfall_graphical root@pineapple:/root/payloads/user/reconnaissance/
 ```
 
 After uploading, fix permissions:
 
 ```bash
 ssh root@pineapple "chmod 755 \
-    /root/payloads/user/pine-spectools/spectools_install/payload.sh \
-    /root/payloads/user/pine-spectools/spectools_waterfall/payload.sh \
-    /root/payloads/user/pine-spectools/spectools_waterfall/bin/*.py \
-    /root/payloads/user/pine-spectools/spectools_waterfall_graphical/payload.sh \
-    /root/payloads/user/pine-spectools/spectools_waterfall_graphical/bin/*.py"
+    /root/payloads/user/reconnaissance/spectools_install/payload.sh \
+    /root/payloads/user/reconnaissance/spectools_waterfall/payload.sh \
+    /root/payloads/user/reconnaissance/spectools_waterfall/bin/*.py \
+    /root/payloads/user/reconnaissance/spectools_waterfall_graphical/payload.sh \
+    /root/payloads/user/reconnaissance/spectools_waterfall_graphical/bin/*.py"
 ```
 
 ---
