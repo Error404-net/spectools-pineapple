@@ -1,24 +1,44 @@
 Spectools-pineapple
 --------------
 
-# Spectools Pineapple Pager Port
+# SpecPine — Spectrum Analysis for the Hak5 WiFi Pineapple Pager
 
-This project is a fork of caljorden/spectools and adapted to run on the **Hak5 WiFi Pineapple Pager** platform.
+A bundled Pager-native app that brings RF spectrum analysis (Wi-Spy DBx) to the Hak5 WiFi Pineapple Pager. Modeled on BluePine: one payload, one menu, every feature inside it.
 
-The goal of this repository is to modernize and package the original tool so it can be used as a **payload on the Pineapple Pager**, enabling wireless analysis functionality directly from the device's payload interface with a modern UI where available.
+This repo also contains the upstream `spectools` C sources with Pineapple-specific patches and a cross-compiled MIPS drop targeting Pager firmware 24.10.1 (mipsel_24kc / ramips/mt76x8).
 
-Als
+---
+
+## Quick Start
+
+End users:
+- See `INSTALL.md` for SCP, install, and usage walkthrough.
+- Distributable zip: `pine-spectools.zip` at the repo root.
+
+Builders:
+```bash
+bash scripts/package.sh
+```
+Re-stages `dist/pine-spectools/specpine/` from `payloads/specpine/` and `spectools-pineapple-build/`, produces `pine-spectools.zip`.
 
 ---
 
 ## Repository Layout
 
+- `payloads/specpine/` — the SpecPine Pager app (sole shipped payload).
+  - `payload.sh` — orchestrator (header + main menu loop).
+  - `include/funcs_main.sh` — install/probe/helpers/button watcher.
+  - `include/funcs_menu.sh` — menus, dialogs, dependency + ringtone install.
+  - `include/funcs_scan.sh` — quick scan, text waterfall, graphical waterfall, channel analysis, anomaly detection.
+  - `bin/` — bridge (`spectools_bridge.py`), ASCII renderer, framebuffer renderer; cross-compiled `spectool_raw` / `spectool_net` populated by `package.sh`.
+  - `data/` — udev rules, ASCII logo.
+- `payloads/legacy/` — the prior 3-payload split (`spectools_install`, `spectools_waterfall`, `spectools_waterfall_graphical`). Kept for reference; **not** shipped in the zip.
+- `BluePine-WiFi-Pineapple-Pager-main/` — reference Pager app whose UX patterns SpecPine adapts (RTTTL strings, evtest button watcher, modular `include/funcs_*.sh` layout).
 - `spectool sourcecode/` — upstream spectools sources plus minimal Pineapple-specific patches.
-- `spectools-pineapple-build/` — prebuilt binaries, runtime libraries, and documentation for the Pineapple drop.
-- `wifipineapplepager-payloads-master/` — payload scaffolding; includes the Pager-ready payload in `library/user/reconnaissance/spectools_net/`.
-- `99-wispy.rules` — example udev rules for USB access when running on desktop Linux.
-- `AGENTS.md` — contributor quick-start guide.
-- 'tod.md' - where tasks are to be planned and implimented.
+- `spectools-pineapple-build/` — prebuilt MIPS binaries and runtime libraries.
+- `99-wispy.rules` — udev rules for USB access.
+- `scripts/package.sh` — staging + zip builder.
+- `AGENTS.md` — contributor guide.
 
 ---
 
@@ -48,43 +68,32 @@ Als
    rsync -a "$INSTALL_ROOT/usr/bin/" "$PWD/../spectools-pineapple-build/bin/"
    rsync -a "$INSTALL_ROOT/usr/lib/" "$PWD/../spectools-pineapple-build/lib/"
    ```
-   Copy any updated `libusb` artifacts from the SDK if they were rebuilt.
 6. Update `spectools-pineapple-build/README.md` with build metadata whenever the toolchain or target firmware changes.
 
 ---
 
-## Installing on the Pineapple Pager
+## Features (SpecPine)
 
-The easiest path is to copy the prebuilt drop:
-```bash
-scp -r spectools-pineapple-build/bin root@pager:/usr/bin/
-scp -r spectools-pineapple-build/lib root@pager:/usr/lib/
-ssh root@pager "chmod +x /usr/bin/spectool_* && ldconfig"
-```
-Then validate USB access with `spectool_raw --list`. See `spectools-pineapple-build/README.md` for more troubleshooting tips.
-
----
-
-## Pineapple Payload
-
-The payload directory `wifipineapplepager-payloads-master/library/user/reconnaissance/spectools_net/` contains a Pager-ready script. Copy that folder to your device (e.g. `/root/payloads/library/user/reconnaissance/`) and launch it from the Pineapple UI or CLI:
-```bash
-cd /root/payloads/library/user/reconnaissance/spectools_net
-./payload start      # start spectool_net in the background
-./payload status     # confirm the listener and USB devices
-./payload stop       # terminate the network server
-```
-Logs are written to `/tmp/spectools_net.log` by default so you can review the session.
+- ASCII startup logo + `Flutter` ringtone (BluePine-style boot).
+- Modular includes (`funcs_main` / `funcs_menu` / `funcs_scan`).
+- Persistent settings via `PAYLOAD_GET/SET_CONFIG` namespace `specpine`.
+- In-app installer (Install / Repair / Uninstall) for `/opt/spectools/`.
+- Live ASCII waterfall (50-char Pager LOG) and full-colour 480×222 framebuffer waterfall.
+- Quick scan, Wi-Fi channel utilization, anomaly / jammer detection.
+- Saved-session browser with replay.
+- Tap-OK pause, long-press-OK stop during scans (BluePine `evtest` pattern).
+- Optional GPS-tagged session metadata via `GPS_GET`.
+- No-loot mode (memory-only sessions, wiped on exit).
 
 ---
 
-## Features
+## Credits
 
-- Cross-compiled binaries for the Pineapple Pager environment
-- Payload-compatible folder structure
-- Lightweight shell wrappers to invoke the binaries from the Pager UI
-- Optional web UI components can still be built on desktop targets
-- Designed to run entirely on-device
+- BluePine (cncartist) — UX patterns, ringtones, evtest button-watcher pattern.
+- Kismet / spectools authors — driver code.
+- WarGames (1983) — title-card inspiration.
+
+---
 
 ## License
 

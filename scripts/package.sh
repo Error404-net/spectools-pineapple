@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# Builds spectools-pineapple-payload.zip from repo contents.
+# Builds pine-spectools.zip from repo contents.
 # Run from the repository root: bash scripts/package.sh
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 STAGE_DIR="${REPO_ROOT}/dist/pine-spectools"
 ZIP_OUT="${REPO_ROOT}/pine-spectools.zip"
+SRC_PAY="${REPO_ROOT}/payloads/specpine"
+SRC_BUILD="${REPO_ROOT}/spectools-pineapple-build"
 
-echo "Building payload package..."
+echo "Building SpecPine payload package..."
 echo "Repo:    $REPO_ROOT"
 echo "Output:  $ZIP_OUT"
 echo ""
@@ -15,76 +17,82 @@ echo ""
 # ── Clean staging area ────────────────────────────────────────────────────────
 rm -rf "$STAGE_DIR"
 mkdir -p \
-    "${STAGE_DIR}/spectools_install/bin" \
-    "${STAGE_DIR}/spectools_install/lib" \
-    "${STAGE_DIR}/spectools_waterfall/bin"
+    "${STAGE_DIR}/specpine/bin" \
+    "${STAGE_DIR}/specpine/lib" \
+    "${STAGE_DIR}/specpine/include" \
+    "${STAGE_DIR}/specpine/data"
 
-# ── Installer payload ─────────────────────────────────────────────────────────
-echo "Staging installer payload..."
-cp "${REPO_ROOT}/payloads/spectools_install/payload.sh" \
-   "${STAGE_DIR}/spectools_install/payload.sh"
-chmod 755 "${STAGE_DIR}/spectools_install/payload.sh"
+# ── SpecPine bundled payload ──────────────────────────────────────────────────
+echo "Staging SpecPine payload..."
+cp "${SRC_PAY}/payload.sh" "${STAGE_DIR}/specpine/payload.sh"
+chmod 755 "${STAGE_DIR}/specpine/payload.sh"
 
-# Binaries (compiled for Pineapple Pager mipsel_24kc)
-for bin in spectool_raw spectool_net; do
-    SRC="${REPO_ROOT}/spectools-pineapple-build/bin/${bin}"
-    if [ ! -f "$SRC" ]; then
-        echo "ERROR: Missing binary: $SRC"
-        exit 1
-    fi
-    cp "$SRC" "${STAGE_DIR}/spectools_install/bin/${bin}"
-    chmod 755 "${STAGE_DIR}/spectools_install/bin/${bin}"
+for f in funcs_main.sh funcs_menu.sh funcs_scan.sh; do
+    cp "${SRC_PAY}/include/${f}" "${STAGE_DIR}/specpine/include/${f}"
+    chmod 644 "${STAGE_DIR}/specpine/include/${f}"
 done
 
-# Libraries (dereference symlinks so zip contains real files)
+if [ -f "${SRC_PAY}/README.md" ]; then
+    cp "${SRC_PAY}/README.md" "${STAGE_DIR}/specpine/README.md"
+fi
+
+# Python helpers (bridge + renderers + splash)
+for py in spectools_bridge.py spectools_waterfall_pager.py spectools_waterfall_fb.py specpine_splash.py; do
+    SRC="${SRC_PAY}/bin/${py}"
+    if [ ! -f "$SRC" ]; then
+        echo "ERROR: Missing python helper: $SRC"
+        exit 1
+    fi
+    cp "$SRC" "${STAGE_DIR}/specpine/bin/${py}"
+    chmod 755 "${STAGE_DIR}/specpine/bin/${py}"
+done
+
+# MIPS binaries (compiled for ramips/mt76x8 / mipsel_24kc)
+for bin in spectool_raw spectool_net; do
+    SRC="${SRC_BUILD}/bin/${bin}"
+    if [ ! -f "$SRC" ]; then
+        echo "ERROR: Missing binary: $SRC"
+        echo "       Cross-compile with the OpenWrt SDK first."
+        exit 1
+    fi
+    cp "$SRC" "${STAGE_DIR}/specpine/bin/${bin}"
+    chmod 755 "${STAGE_DIR}/specpine/bin/${bin}"
+done
+
+# Libraries (real files + symlinks)
 for lib in libusb-0.1.so.4.4.4 libusb-1.0.so.0.4.0; do
-    SRC="${REPO_ROOT}/spectools-pineapple-build/lib/${lib}"
+    SRC="${SRC_BUILD}/lib/${lib}"
     if [ ! -f "$SRC" ]; then
         echo "ERROR: Missing library: $SRC"
         exit 1
     fi
-    cp "$SRC" "${STAGE_DIR}/spectools_install/lib/${lib}"
-    chmod 644 "${STAGE_DIR}/spectools_install/lib/${lib}"
+    cp "$SRC" "${STAGE_DIR}/specpine/lib/${lib}"
+    chmod 644 "${STAGE_DIR}/specpine/lib/${lib}"
 done
-# Re-create symlinks in staging (zip -y preserves them)
 (
-    cd "${STAGE_DIR}/spectools_install/lib"
+    cd "${STAGE_DIR}/specpine/lib"
     ln -sf libusb-0.1.so.4.4.4 libusb-0.1.so.4
     ln -sf libusb-1.0.so.0.4.0 libusb-1.0.so.0
 )
 
-# udev rules (optional — include if present)
-UDEV="${REPO_ROOT}/99-wispy.rules"
-[ -f "$UDEV" ] && cp "$UDEV" "${STAGE_DIR}/spectools_install/99-wispy.rules"
+# Data files (udev rules, ASCII logo)
+if [ -f "${SRC_PAY}/data/99-wispy.rules" ]; then
+    cp "${SRC_PAY}/data/99-wispy.rules" "${STAGE_DIR}/specpine/data/99-wispy.rules"
+elif [ -f "${REPO_ROOT}/99-wispy.rules" ]; then
+    cp "${REPO_ROOT}/99-wispy.rules" "${STAGE_DIR}/specpine/data/99-wispy.rules"
+fi
+if [ -f "${SRC_PAY}/data/specpine_logo.txt" ]; then
+    cp "${SRC_PAY}/data/specpine_logo.txt" "${STAGE_DIR}/specpine/data/specpine_logo.txt"
+fi
 
-# ── Text waterfall payload ────────────────────────────────────────────────────
-echo "Staging text waterfall payload..."
-cp "${REPO_ROOT}/payloads/spectools_waterfall/payload.sh" \
-   "${STAGE_DIR}/spectools_waterfall/payload.sh"
-chmod 755 "${STAGE_DIR}/spectools_waterfall/payload.sh"
-
-cp "${REPO_ROOT}/payloads/spectools_waterfall/bin/spectools_bridge.py" \
-   "${STAGE_DIR}/spectools_waterfall/bin/spectools_bridge.py"
-cp "${REPO_ROOT}/payloads/spectools_waterfall/bin/spectools_waterfall_pager.py" \
-   "${STAGE_DIR}/spectools_waterfall/bin/spectools_waterfall_pager.py"
-chmod 755 \
-    "${STAGE_DIR}/spectools_waterfall/bin/spectools_bridge.py" \
-    "${STAGE_DIR}/spectools_waterfall/bin/spectools_waterfall_pager.py"
-
-# ── Graphical waterfall payload ───────────────────────────────────────────────
-echo "Staging graphical waterfall payload..."
-mkdir -p "${STAGE_DIR}/spectools_waterfall_graphical/bin"
-cp "${REPO_ROOT}/payloads/spectools_waterfall_graphical/payload.sh" \
-   "${STAGE_DIR}/spectools_waterfall_graphical/payload.sh"
-chmod 755 "${STAGE_DIR}/spectools_waterfall_graphical/payload.sh"
-
-cp "${REPO_ROOT}/payloads/spectools_waterfall_graphical/bin/spectools_bridge.py" \
-   "${STAGE_DIR}/spectools_waterfall_graphical/bin/spectools_bridge.py"
-cp "${REPO_ROOT}/payloads/spectools_waterfall_graphical/bin/spectools_waterfall_fb.py" \
-   "${STAGE_DIR}/spectools_waterfall_graphical/bin/spectools_waterfall_fb.py"
-chmod 755 \
-    "${STAGE_DIR}/spectools_waterfall_graphical/bin/spectools_bridge.py" \
-    "${STAGE_DIR}/spectools_waterfall_graphical/bin/spectools_waterfall_fb.py"
+# ANSI/ASCII LOG art for each scan mode
+if [ -d "${SRC_PAY}/data/ansi" ]; then
+    mkdir -p "${STAGE_DIR}/specpine/data/ansi"
+    for f in "${SRC_PAY}/data/ansi/"*.txt; do
+        [ -f "$f" ] || continue
+        cp "$f" "${STAGE_DIR}/specpine/data/ansi/$(basename "$f")"
+    done
+fi
 
 # ── Instructions ──────────────────────────────────────────────────────────────
 cp "${REPO_ROOT}/INSTALL.md" "${STAGE_DIR}/INSTALL.md"
@@ -94,11 +102,11 @@ echo "Creating zip..."
 rm -f "$ZIP_OUT"
 (
     cd "${REPO_ROOT}/dist"
-    zip -r -y "$ZIP_OUT" "pine-spectools/"
+    zip -r -y "$ZIP_OUT" "pine-spectools/" >/dev/null
 )
 
 echo ""
 echo "Done: $ZIP_OUT"
 echo ""
 echo "Contents:"
-(cd "${REPO_ROOT}/dist" && find pine-spectools -type f | sort)
+(cd "${REPO_ROOT}/dist" && find pine-spectools -type f -o -type l | sort)
