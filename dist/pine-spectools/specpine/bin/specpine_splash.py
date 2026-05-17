@@ -170,6 +170,34 @@ def main() -> int:
     signal.signal(signal.SIGINT,  _cleanup)
 
     _disable_vtcon()
+
+    # Prefer pre-rendered theme frames if present (much faster on the MIPS
+    # CPU than the inline drawing fallback below).
+    here = os.path.dirname(os.path.abspath(__file__))
+    theme_dir = os.path.join(here, "..", "data", "theme")
+    anim_dir  = os.path.join(theme_dir, "boot_animation")
+    anim_frames = sorted(
+        os.path.join(anim_dir, f)
+        for f in (os.listdir(anim_dir) if os.path.isdir(anim_dir) else [])
+        if f.startswith("frame_") and f.endswith(".fb")
+    )
+    if anim_frames:
+        for f in anim_frames:
+            try:
+                with open(f, "rb") as fh:
+                    data = fh.read()
+                if len(data) == FB_BYTES:
+                    fb_file.seek(0); fb_file.write(data)
+                    time.sleep(0.45)
+            except OSError:
+                pass
+        # Linger briefly on the last frame.
+        time.sleep(0.4)
+        fb_file.close()
+        _restore_vtcon()
+        return 0
+
+    # ── Fallback: inline drawing (original behaviour) ──
     bg = rgb565(*C_BG)
     grid = rgb565(*C_GRID)
     dim = rgb565(*C_DIM)

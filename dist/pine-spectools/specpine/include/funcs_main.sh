@@ -1,6 +1,11 @@
 # funcs_main.sh — SpecPine domain helpers
 # (sourced by payload.sh; uses globals defined there)
 
+# ── Theme tokens + LOG colour wrappers (LOG_TITLE / LOG_GOOD / etc.) ──────
+if [ -f "${PAYLOAD_ROOT}/data/theme/theme.sh" ]; then
+    source "${PAYLOAD_ROOT}/data/theme/theme.sh"
+fi
+
 # ── ASCII logo ────────────────────────────────────────────────────────────
 specpine_logo() {
     if [ -f "$LOGO_FILE" ]; then
@@ -17,14 +22,18 @@ specpine_logo() {
     fi
 }
 
-# ── Show one of the ANSI/ASCII art frames in data/ansi/<name>.txt ─────────
+# ── Show one of the ASCII art frames. Searches data/ansi/<name>.txt first
+# (per-mode frames) then data/theme/glyphs/<name>.txt (theme tokens). ──
 show_ansi() {
     local name="$1"
-    local f="${PAYLOAD_ROOT}/data/ansi/${name}.txt"
-    [ -f "$f" ] || return 0
-    while IFS= read -r line; do
-        LOG green "$line"
-    done < "$f"
+    local f
+    for f in "${PAYLOAD_ROOT}/data/ansi/${name}.txt" \
+             "${PAYLOAD_ROOT}/data/theme/glyphs/${name}.txt"; do
+        if [ -f "$f" ]; then
+            while IFS= read -r line; do LOG green "$line"; done < "$f"
+            return 0
+        fi
+    done
 }
 
 # ── Ringtone wrapper (respects mute) ──────────────────────────────────────
@@ -165,10 +174,17 @@ install_spectools() {
         cp "$lib" "${INSTALL_LIB}/$(basename "$lib")"
         chmod 644 "${INSTALL_LIB}/$(basename "$lib")"
     done
-    [ ! -e "${INSTALL_LIB}/libusb-0.1.so.4" ] && \
-        ln -sf libusb-0.1.so.4.4.4 "${INSTALL_LIB}/libusb-0.1.so.4" 2>/dev/null || true
-    [ ! -e "${INSTALL_LIB}/libusb-1.0.so.0" ] && \
-        ln -sf libusb-1.0.so.0.4.0 "${INSTALL_LIB}/libusb-1.0.so.0" 2>/dev/null || true
+    local _lf _lb _sn _lk
+    for _lf in "${INSTALL_LIB}"/libusb-*.so.*; do
+        [ -f "$_lf" ] || continue
+        _lb=$(basename "$_lf")
+        _sn=$(printf '%s' "$_lb" | sed -E 's/^(.*\.so\.[0-9]+).*/\1/')
+        _lk=$(printf '%s' "$_lb" | sed -E 's/^(.*\.so).*/\1/')
+        [ "$_sn" != "$_lb" ] && [ ! -e "${INSTALL_LIB}/${_sn}" ] && \
+            ln -sf "$_lb" "${INSTALL_LIB}/${_sn}" 2>/dev/null || true
+        [ "$_lk" != "$_lb" ] && [ "$_lk" != "$_sn" ] && [ ! -e "${INSTALL_LIB}/${_lk}" ] && \
+            ln -sf "$_sn" "${INSTALL_LIB}/${_lk}" 2>/dev/null || true
+    done
     LOG green "Libraries installed"
 
     cat > "${INSTALL_CONF}/spectools.conf" <<'EOF'

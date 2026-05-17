@@ -3,7 +3,7 @@
 # Author: Error404-net
 # Description: SpecPine - RF spectrum analysis suite for Wi-Spy DBx. Status, Quick Scan, ASCII Waterfall, Graphical Waterfall, Channel Analysis, Anomaly Detection, Saved Sessions, Install, Settings.
 # Category: reconnaissance
-# Version: 1.0
+# Version: 1.2
 #
 # ──────────────────────────────────────────────────────────────────────────
 # UI conventions, structure, ringtone names, and button-watcher pattern are
@@ -60,7 +60,7 @@ LOCK_FILE="/tmp/specpine.lock"
 PID_FILE="/tmp/specpine.pid"
 VTCON="/sys/class/vtconsole/vtcon1/bind"
 
-APP_VERSION="1.0"
+APP_VERSION="1.2"
 CONFIG_NS="specpine"
 
 # ── Defaults (overridden by PAYLOAD_GET_CONFIG below) ─────────────────────
@@ -134,16 +134,14 @@ cleanup() {
 }
 trap cleanup EXIT SIGINT SIGTERM SIGHUP
 
-# ── Singleton guard ───────────────────────────────────────────────────────
-if [ -f "$LOCK_FILE" ]; then
-    OLD_PID="$(cat "$PID_FILE" 2>/dev/null)"
-    if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
-        LOG red "SpecPine already running (pid $OLD_PID)"
-        ALERT "SpecPine is already running. Wait for it to exit."
-        exit 1
-    fi
-    rm -f "$LOCK_FILE" "$PID_FILE"
+# ── Singleton guard (name-based; PID-based check false-triggered on PID reuse)
+SPECPINE_PEERS=$(pgrep -f "specpine/payload.sh" 2>/dev/null | grep -vx "$$" | grep -vx "$PPID" | wc -l)
+if [ "${SPECPINE_PEERS:-0}" -gt 0 ]; then
+    LOG red "SpecPine already running (${SPECPINE_PEERS} peer(s))"
+    ALERT "SpecPine is already running. Wait for it to exit."
+    exit 1
 fi
+rm -f "$LOCK_FILE" "$PID_FILE"
 touch "$LOCK_FILE"
 echo $$ > "$PID_FILE"
 : > "$LOG_FILE"
@@ -157,19 +155,49 @@ check_dependencies
 config_check
 settings_check
 
-# ── Boot splash (BluePine pattern: payload.sh:400-414) ────────────────────
+# ── Boot splash + landing screen (BluePine pattern: payload.sh:400-414) ───
 specpine_logo
 [ "$mute" = "false" ] && RINGTONE "Flutter"
-LOG green "── Press OK to Start ──"
-WAIT_FOR_BUTTON_PRESS A
-sleep 0.2
 
-# Optional framebuffer splash (skips silently if /dev/fb0 missing)
+# Optional framebuffer splash plays first (skips silently if /dev/fb0 missing).
 if [ -e /dev/fb0 ] && [ -x "${PAYLOAD_ROOT}/bin/specpine_splash.py" ]; then
     python3 "${PAYLOAD_ROOT}/bin/specpine_splash.py" 2>/dev/null || true
 fi
 
+# Show the landing glyph (theme/glyphs/landing.txt) so the user sees the
+# tap-vs-hold instructions visibly framed.
+show_ansi landing 2>/dev/null || \
+    LOG green "── Tap OK: Waterfall   Hold OK: Menu ──"
+LOG cyan  "(idle 30s also goes to Menu)"
+
 device_probe   # populates WISPY_PRESENT, WISPY_DEVICE_NAME, WISPY_DEVICE_ID
+
+# Tap-vs-hold gate. Re-uses the existing button watcher (start_evtest /
+# check_cancel) so a tap sets is_btn_paused="pause" and a hold ≥0.8s
+# sets is_btn_stopped="stop".
+start_evtest
+sleep 0.3   # drain A-release event from firmware launch screen before watching
+clear_btn_evt
+LANDING_CHOICE=""
+LANDING_DEADLINE=$(( $(date +%s) + 30 ))
+while [ -z "$LANDING_CHOICE" ] && [ "$(date +%s)" -lt "$LANDING_DEADLINE" ]; do
+    check_cancel
+    if is_btn_stopped; then LANDING_CHOICE="menu";      fi
+    if is_btn_paused;  then LANDING_CHOICE="waterfall"; fi
+    sleep 0.15
+done
+killall evtest 2>/dev/null || true
+EVTEST_PID=""
+clear_btn_evt
+
+if [ "$LANDING_CHOICE" != "menu" ]; then
+    LOG green "── Starting waterfall (defaults) ──"
+    current_band="$default_band"
+    current_session_name="$(date +%Y%m%d_%H%M%S)"
+    current_save_loot="true"
+    [ "$noloot" = "true" ] && current_save_loot="false"
+    text_waterfall
+fi
 
 # ── Main menu loop (BluePine pattern: payload.sh:420-965) ─────────────────
 while true; do
@@ -179,15 +207,14 @@ while true; do
 
     case "$main_option" in
         1)  status_display ;;
-        2)  if pre_scan_dialog; then quick_scan;          fi ;;
-        3)  if pre_scan_dialog; then text_waterfall;      fi ;;
-        4)  if pre_scan_dialog; then graphical_waterfall; fi ;;
-        5)  if pre_scan_dialog; then channel_analysis;    fi ;;
-        6)  if pre_scan_dialog; then anomaly_detection;   fi ;;
-        7)  sub_menu_sessions ;;
-        8)  sub_menu_install ;;
-        9)  sub_menu_settings ;;
-        10) sub_menu_about ;;
+        2)  if pre_scan_dialog; then quick_scan;        fi ;;
+        3)  if pre_scan_dialog; then text_waterfall;    fi ;;
+        4)  if pre_scan_dialog; then channel_analysis;  fi ;;
+        5)  if pre_scan_dialog; then anomaly_detection; fi ;;
+        6)  sub_menu_sessions ;;
+        7)  sub_menu_install ;;
+        8)  sub_menu_settings ;;
+        9)  sub_menu_about ;;
         0)
             resp=$(CONFIRMATION_DIALOG "Exit SpecPine?")
             if [ "$resp" = "$DUCKYSCRIPT_USER_CONFIRMED" ]; then
@@ -200,8 +227,8 @@ while true; do
         *)  ;;
     esac
 
-    # Persist last-selected index (only on real selections)
-    if [ "$main_option" -ge 0 ] 2>/dev/null; then
+    # Persist last-selected index (only on real selections, not option 0 / cancel)
+    if [ "$main_option" -ge 1 ] 2>/dev/null; then
         selnum_main="$main_option"
         PAYLOAD_SET_CONFIG "$CONFIG_NS" selnum_main "$selnum_main" >/dev/null 2>&1 || true
     fi

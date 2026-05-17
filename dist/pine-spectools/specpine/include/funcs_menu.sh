@@ -93,7 +93,12 @@ Install them to ${DEST_DIR}?")
 main_menu() {
     [ "$mute" = "false" ] && led_safe MAGENTA
 
-    local items=( "Status" "Quick Scan" "Text Waterfall" "Graphical Waterfall" \
+    # NOTE: "Graphical Waterfall" is intentionally absent from the primary menu.
+    # On Pager firmware 24.10.1 the framebuffer renderer is overwritten in
+    # real-time by the Pager UI overlay (no vtcon1, no firmware suppression
+    # API). The function is preserved under Settings → Diagnostics for
+    # power-user investigation. See payloads/specpine/README.md.
+    local items=( "Status" "Quick Scan" "Text Waterfall" \
                   "Channel Analysis" "Anomaly Detection" "Saved Sessions" \
                   "Install" "Settings" "About" "Exit" )
     local pick_str="\"SpecPine - Main Menu\""
@@ -109,13 +114,12 @@ main_menu() {
         "Status")              selnum=1  ;;
         "Quick Scan")          selnum=2  ;;
         "Text Waterfall")      selnum=3  ;;
-        "Graphical Waterfall") selnum=4  ;;
-        "Channel Analysis")    selnum=5  ;;
-        "Anomaly Detection")   selnum=6  ;;
-        "Saved Sessions")      selnum=7  ;;
-        "Install")             selnum=8  ;;
-        "Settings")            selnum=9  ;;
-        "About")               selnum=10 ;;
+        "Channel Analysis")    selnum=4  ;;
+        "Anomaly Detection")   selnum=5  ;;
+        "Saved Sessions")      selnum=6  ;;
+        "Install")             selnum=7  ;;
+        "Settings")            selnum=8  ;;
+        "About")               selnum=9  ;;
         "Exit")                selnum=0  ;;
         *)                     selnum=-1 ;;   # cancelled/back → loop without exit
     esac
@@ -195,16 +199,34 @@ sub_menu_diagnostics() {
             "Test LIST_PICKER" \
             "Test Settings Persist" \
             "Test Bridge Dry-run" \
+            "Graphical Waterfall (broken)" \
             "Back")
         case "$r" in
-            "Test Button Watcher") diag_test_button_watcher ;;
-            "Test Framebuffer")    diag_test_framebuffer ;;
-            "Test LIST_PICKER")    diag_test_list_picker ;;
-            "Test Settings Persist") diag_test_settings_persist ;;
-            "Test Bridge Dry-run") diag_test_bridge_dryrun ;;
-            *)                     return ;;
+            "Test Button Watcher")          diag_test_button_watcher ;;
+            "Test Framebuffer")             diag_test_framebuffer ;;
+            "Test LIST_PICKER")             diag_test_list_picker ;;
+            "Test Settings Persist")        diag_test_settings_persist ;;
+            "Test Bridge Dry-run")          diag_test_bridge_dryrun ;;
+            "Graphical Waterfall (broken)") diag_graphical_waterfall ;;
+            *)                              return ;;
         esac
     done
+}
+
+diag_graphical_waterfall() {
+    LOG blue   "── Graphical Waterfall (broken on 24.10.1) ──"
+    LOG yellow "This firmware has no /sys/class/vtconsole/vtcon1"
+    LOG yellow "and no API to suppress the Pager UI overlay."
+    LOG yellow "Pixels we draw to /dev/fb0 are overwritten by"
+    LOG yellow "the firmware's title bar / payload-log strip."
+    LOG       ""
+    LOG "Launch anyway? (Use 'Text Waterfall' instead.)"
+    local r
+    r=$(CONFIRMATION_DIALOG "Run anyway (will likely flicker)?")
+    if [ "$r" = "$DUCKYSCRIPT_USER_CONFIRMED" ]; then
+        if pre_scan_dialog; then graphical_waterfall; fi
+    fi
+    show_menu_end_OK=2
 }
 
 diag_test_button_watcher() {

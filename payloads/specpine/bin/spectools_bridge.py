@@ -274,14 +274,21 @@ class Bridge:
 
     def _iter_command(self, command: str) -> Iterable[str]:
         retries = 0
+        tokens = shlex.split(command)
+        extra_env: Dict[str, str] = {}
+        while tokens and "=" in tokens[0] and not tokens[0].startswith("-"):
+            k, v = tokens.pop(0).split("=", 1)
+            extra_env[k] = v
+        env = {**os.environ, **extra_env} if extra_env else None
         while not self.stop:
             self.status(f"Starting command: {command}")
             proc = subprocess.Popen(
-                shlex.split(command),
+                tokens,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                env=env,
             )
             assert proc.stdout is not None
             for line in proc.stdout:

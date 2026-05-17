@@ -64,11 +64,8 @@ text_waterfall() {
     LOG green "Scanning - tap OK to pause, hold OK ≥0.8s to stop"
     LOG       "______________________________________________"
 
-    python3 "$RENDERER_ASCII_BIN" \
-        --events-file "$EVENTS_FILE" \
-        --follow \
-        --poll-interval 0.05 \
-        2>/dev/null | \
+    # Process substitution keeps the while-loop in the parent shell so
+    # `break` propagates and total_scans / SESSION_DIR mutations stick.
     while IFS= read -r wfline; do
         check_cancel
         if is_btn_stopped; then break; fi
@@ -81,8 +78,20 @@ text_waterfall() {
             done
             LOG green "[resumed]"
         fi
-        LOG green "$wfline"
-    done
+        # Renderer prefixes sweep rows with R:/Y:/G: based on peak dBm.
+        # Strip + route to the matching LOG colour. Headers stay un-tagged.
+        case "$wfline" in
+            R:*) LOG red    "${wfline#R:}" ;;
+            Y:*) LOG yellow "${wfline#Y:}" ;;
+            G:*) LOG green  "${wfline#G:}" ;;
+            *)   LOG green  "$wfline"      ;;
+        esac
+    done < <(python3 "$RENDERER_ASCII_BIN" \
+                --events-file "$EVENTS_FILE" \
+                --banner "Hold OK ≥0.8s stop. Loot:${SESSION_DIR##*/}" \
+                --follow \
+                --poll-interval 0.05 \
+                2>/dev/null)
 
     stop_bridge
     killall evtest 2>/dev/null || true

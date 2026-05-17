@@ -94,6 +94,26 @@ if [ -d "${SRC_PAY}/data/ansi" ]; then
     done
 fi
 
+# Theme tree (theme.sh + glyphs/*.txt + palette.md + .fb framebuffer assets)
+if [ -d "${SRC_PAY}/data/theme" ]; then
+    mkdir -p "${STAGE_DIR}/specpine/data/theme/glyphs" \
+             "${STAGE_DIR}/specpine/data/theme/boot_animation"
+    [ -f "${SRC_PAY}/data/theme/theme.sh" ] && \
+        cp "${SRC_PAY}/data/theme/theme.sh"   "${STAGE_DIR}/specpine/data/theme/theme.sh"
+    [ -f "${SRC_PAY}/data/theme/palette.md" ] && \
+        cp "${SRC_PAY}/data/theme/palette.md" "${STAGE_DIR}/specpine/data/theme/palette.md"
+    [ -f "${SRC_PAY}/data/theme/splash.fb" ] && \
+        cp "${SRC_PAY}/data/theme/splash.fb"  "${STAGE_DIR}/specpine/data/theme/splash.fb"
+    for f in "${SRC_PAY}/data/theme/glyphs/"*.txt; do
+        [ -f "$f" ] || continue
+        cp "$f" "${STAGE_DIR}/specpine/data/theme/glyphs/$(basename "$f")"
+    done
+    for f in "${SRC_PAY}/data/theme/boot_animation/"*.fb; do
+        [ -f "$f" ] || continue
+        cp "$f" "${STAGE_DIR}/specpine/data/theme/boot_animation/$(basename "$f")"
+    done
+fi
+
 # ── Instructions ──────────────────────────────────────────────────────────────
 cp "${REPO_ROOT}/INSTALL.md" "${STAGE_DIR}/INSTALL.md"
 

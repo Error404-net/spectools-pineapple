@@ -21,11 +21,11 @@ from pathlib import Path
 # Total payload_log line width
 LINE_WIDTH = 50
 
-# Spectrum characters span LINE_WIDTH - 2 pipes - 4 peak = 44
-SPECTRUM_COLS = 44
+# Spectrum characters span LINE_WIDTH - 2 (tag) - 2 pipes - 4 peak = 42
+SPECTRUM_COLS = 42
 
 # Emit a freq/scale header every N sweeps
-HEADER_EVERY = 15
+HEADER_EVERY = 10
 
 # dBm thresholds → display char, ordered from lowest to highest
 DENSITY: list[tuple[int, str]] = [
@@ -85,6 +85,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--follow", action="store_true", help="Tail the events file")
     p.add_argument("--poll-interval", type=float, default=0.05,
                    help="Seconds between polls when following")
+    p.add_argument("--banner", default="",
+                   help="Optional one-line banner emitted under the scale line")
     args = p.parse_args(argv)
 
     events_path = Path(args.events_file)
@@ -99,6 +101,8 @@ def main(argv: list[str] | None = None) -> int:
 
     emit("SpecTools Waterfall - Wi-Spy DBx")
     emit(SCALE_LINE)
+    if args.banner:
+        emit(truncate(args.banner))
 
     if not events_path.exists():
         emit("Waiting for device...")
@@ -149,7 +153,14 @@ def main(argv: list[str] | None = None) -> int:
                 sampled = resample(bins, SPECTRUM_COLS)
                 row = "".join(bin_to_char(v) for v in sampled)
                 peak = int(round(max(bins)))
-                emit(f"|{row}|{peak:4d}")
+                # Tag tier so the bash wrapper can route to LOG red/yellow/green.
+                if peak >= -50:
+                    tag = "R:"
+                elif peak >= -70:
+                    tag = "Y:"
+                else:
+                    tag = "G:"
+                emit(f"{tag}|{row}|{peak:4d}")
                 sweep_count += 1
 
             elif etype == "error":
