@@ -46,6 +46,7 @@ fi
 BRIDGE_BIN="${PAYLOAD_ROOT}/bin/spectools_bridge.py"
 RENDERER_ASCII_BIN="${PAYLOAD_ROOT}/bin/spectools_waterfall_pager.py"
 RENDERER_FB_BIN="${PAYLOAD_ROOT}/bin/spectools_waterfall_fb.py"
+RENDERER_HTTP_BIN="${PAYLOAD_ROOT}/bin/spectools_waterfall_http.py"
 LOGO_FILE="${PAYLOAD_ROOT}/data/specpine_logo.txt"
 UDEV_RULES_SRC="${PAYLOAD_ROOT}/data/99-wispy.rules"
 UDEV_RULES_DST="/etc/udev/rules.d/99-wispy.rules"
@@ -82,6 +83,7 @@ total_anomalies=0
 BRIDGE_PID=""
 RENDERER_PID=""
 EVTEST_PID=""
+HTTP_PID=""
 selnum=0
 show_menu_end_OK=1
 current_band=""
@@ -119,9 +121,11 @@ cleanup() {
     [ -n "$RENDERER_PID" ] && kill "$RENDERER_PID" 2>/dev/null || true
     [ -n "$BRIDGE_PID" ]   && kill "$BRIDGE_PID"   2>/dev/null || true
     [ -n "$EVTEST_PID" ]   && kill "$EVTEST_PID"   2>/dev/null || true
+    [ -n "$HTTP_PID" ]     && kill "$HTTP_PID"     2>/dev/null || true
     pkill -f "spectools_bridge.py"          2>/dev/null || true
     pkill -f "spectools_waterfall_pager.py" 2>/dev/null || true
     pkill -f "spectools_waterfall_fb.py"    2>/dev/null || true
+    pkill -f "spectools_waterfall_http.py"  2>/dev/null || true
     killall evtest 2>/dev/null || true
     sleep 0.3
     [ -e "$VTCON" ] && echo 1 > "$VTCON" 2>/dev/null || true

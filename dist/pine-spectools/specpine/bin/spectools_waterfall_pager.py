@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -27,8 +28,8 @@ SPECTRUM_COLS = 42
 # Emit a freq/scale header every N sweeps
 HEADER_EVERY = 10
 
-# dBm thresholds → display char, ordered from lowest to highest
-DENSITY: list[tuple[int, str]] = [
+# ASCII fallback glyph set (always safe)
+_DENSITY_ASCII: list[tuple[int, str]] = [
     (-90, " "),  # noise floor
     (-80, "."),  # very low signal
     (-70, "-"),  # low signal
@@ -37,14 +38,44 @@ DENSITY: list[tuple[int, str]] = [
     (999, "#"),  # very strong / saturation
 ]
 
-SCALE_LINE = "[ ]=<-90 .=-80 -=-70 ==-65 +=-55 #>-55]"[:LINE_WIDTH]
+# Unicode block-shading glyphs (used when stdout is UTF-8 capable)
+_DENSITY_UNICODE: list[tuple[int, str]] = [
+    (-90, " "),       # noise floor
+    (-80, "░"),  # ░ very low
+    (-70, "▒"),  # ▒ low
+    (-65, "▓"),  # ▓ medium
+    (-55, "█"),  # █ strong
+    (999, "█"),  # █ saturation
+]
+
+_SCALE_ASCII   = "[ ]=<-90 .=-80 -=-70 ==-65 +=-55 #>-55]"
+_SCALE_UNICODE = "[░<-80 ▒<-70 ▓<-65 █>-55 (dBm) ]"
+
+# 2.4 GHz Wi-Fi channel centres → single-char marker for the freq header
+_CH_2G: dict[int, str] = {2437000: "6", 2462000: ">"}
+# 5 GHz UNII-1/UNII-3 centres → single-char marker
+_CH_5G: dict[int, str] = {
+    5180000: "a", 5200000: "b", 5220000: "c", 5240000: "d",
+    5745000: "e", 5765000: "f", 5785000: "g", 5805000: "h",
+}
 
 
-def bin_to_char(dbm: int) -> str:
-    for threshold, ch in DENSITY:
+def _unicode_ok() -> bool:
+    """Return True if stdout encoding and locale both appear to be UTF-8."""
+    enc = getattr(sys.stdout, "encoding", None) or ""
+    if "utf" in enc.lower():
+        return True
+    for var in ("LC_ALL", "LC_CTYPE", "LANG"):
+        if "utf" in os.environ.get(var, "").lower():
+            return True
+    return False
+
+
+def bin_to_char(dbm: int, density: list[tuple[int, str]]) -> str:
+    for threshold, ch in density:
         if dbm <= threshold:
             return ch
-    return "#"
+    return density[-1][1]
 
 
 def resample(bins: list[int], width: int) -> list[int]:
@@ -66,13 +97,30 @@ def resample(bins: list[int], width: int) -> list[int]:
     return result
 
 
-def freq_header(freq_start_khz: int | None, freq_end_khz: int | None) -> str:
+def freq_header(freq_start_khz: int | None, freq_end_khz: int | None,
+                cols: int = SPECTRUM_COLS) -> str:
     label_l = f"{freq_start_khz // 1000}MHz" if freq_start_khz is not None else "?MHz"
     label_r = f"{freq_end_khz // 1000}MHz" if freq_end_khz is not None else "?MHz"
-    inner = SPECTRUM_COLS - len(label_l) - len(label_r)
-    dashes = "-" * max(0, inner)
-    label = (label_l + dashes + label_r)[:SPECTRUM_COLS].ljust(SPECTRUM_COLS)
-    return f"[{label}]"
+
+    buf = ["-"] * cols
+    for i, c in enumerate(label_l[:cols]):
+        buf[i] = c
+    for i, c in enumerate(label_r):
+        pos = cols - len(label_r) + i
+        if 0 <= pos < cols:
+            buf[pos] = c
+
+    # Overlay channel markers only where a dash still sits
+    if freq_start_khz is not None and freq_end_khz is not None:
+        span = freq_end_khz - freq_start_khz
+        ch_map = _CH_2G if freq_start_khz < 3_000_000 else _CH_5G
+        for freq_khz, mark in ch_map.items():
+            if freq_start_khz <= freq_khz <= freq_end_khz and span > 0:
+                pos = int((freq_khz - freq_start_khz) / span * cols)
+                if 0 <= pos < cols and buf[pos] == "-":
+                    buf[pos] = mark
+
+    return f"[{''.join(buf)[:cols].ljust(cols)}]"
 
 
 def truncate(text: str, width: int = LINE_WIDTH) -> str:
@@ -87,7 +135,15 @@ def main(argv: list[str] | None = None) -> int:
                    help="Seconds between polls when following")
     p.add_argument("--banner", default="",
                    help="Optional one-line banner emitted under the scale line")
+    p.add_argument("--unicode", action="store_true", default=None,
+                   help="Force Unicode block glyphs (auto-detected if omitted)")
+    p.add_argument("--no-unicode", dest="unicode", action="store_false",
+                   help="Force ASCII glyphs regardless of terminal encoding")
     args = p.parse_args(argv)
+
+    use_unicode = _unicode_ok() if args.unicode is None else args.unicode
+    density = _DENSITY_UNICODE if use_unicode else _DENSITY_ASCII
+    scale_line = (_SCALE_UNICODE if use_unicode else _SCALE_ASCII)[:LINE_WIDTH]
 
     events_path = Path(args.events_file)
     sweep_count = 0
@@ -100,7 +156,7 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.flush()
 
     emit("SpecTools Waterfall - Wi-Spy DBx")
-    emit(SCALE_LINE)
+    emit(scale_line)
     if args.banner:
         emit(truncate(args.banner))
 
@@ -151,7 +207,7 @@ def main(argv: list[str] | None = None) -> int:
                     last_header_at = sweep_count
 
                 sampled = resample(bins, SPECTRUM_COLS)
-                row = "".join(bin_to_char(v) for v in sampled)
+                row = "".join(bin_to_char(v, density) for v in sampled)
                 peak = int(round(max(bins)))
                 # Tag tier so the bash wrapper can route to LOG red/yellow/green.
                 if peak >= -50:

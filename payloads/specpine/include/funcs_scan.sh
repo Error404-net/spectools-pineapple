@@ -58,6 +58,13 @@ text_waterfall() {
         show_menu_end_OK=2
         return 1
     fi
+    # Launch the browser-based graphical waterfall server on port 8080.
+    local http_ip
+    http_ip=$(ip -4 addr show br-lan 2>/dev/null | awk '/inet /{sub("/.*","",$2); print $2; exit}')
+    [ -z "$http_ip" ] && http_ip="172.16.52.1"
+    python3 "$RENDERER_HTTP_BIN" --events-file "$EVENTS_FILE" >> "$LOG_FILE" 2>&1 &
+    HTTP_PID=$!
+    LOG cyan "Graphical: http://${http_ip}:8080/"
     start_evtest
     ringtone_play "GlitchHack"
     led_safe R 0 G 255 B 0
@@ -94,6 +101,7 @@ text_waterfall() {
                 2>/dev/null)
 
     stop_bridge
+    [ -n "$HTTP_PID" ] && { kill "$HTTP_PID" 2>/dev/null || true; HTTP_PID=""; }
     killall evtest 2>/dev/null || true
     EVTEST_PID=""
     clear_btn_evt

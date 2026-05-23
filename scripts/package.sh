@@ -37,7 +37,7 @@ if [ -f "${SRC_PAY}/README.md" ]; then
 fi
 
 # Python helpers (bridge + renderers + splash)
-for py in spectools_bridge.py spectools_waterfall_pager.py spectools_waterfall_fb.py specpine_splash.py; do
+for py in spectools_bridge.py spectools_waterfall_pager.py spectools_waterfall_fb.py spectools_waterfall_http.py specpine_splash.py; do
     SRC="${SRC_PAY}/bin/${py}"
     if [ ! -f "$SRC" ]; then
         echo "ERROR: Missing python helper: $SRC"
