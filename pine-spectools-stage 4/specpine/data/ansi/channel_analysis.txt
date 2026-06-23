@@ -1,5 +1,0 @@
-┌─[ CHANNEL ANALYSIS ]────────────────────────┐
-│  > tally . . . per-channel utilisation %    │
-│  > 2.4 GHz Ch 1-11 . 5 GHz Ch 36-165         │
-│  > rank . . . busy → quiet                  │
-└─────────────────────────────────────────────┘

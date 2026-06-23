@@ -61,9 +61,7 @@ BRIDGE_BIN="${PAYLOAD_ROOT}/bin/spectools_bridge.py"
 RENDERER_ASCII_BIN="${PAYLOAD_ROOT}/bin/spectools_waterfall_pager.py"
 RENDERER_FB_BIN="${PAYLOAD_ROOT}/bin/spectools_waterfall_fb.py"
 FB_SCREENSHOT_BIN="${PAYLOAD_ROOT}/bin/fb_screenshot.py"
-RENDERER_HTTP_BIN="${PAYLOAD_ROOT}/bin/spectools_waterfall_http.py"
 HUD_BIN="${PAYLOAD_ROOT}/bin/specpine_hud.py"
-LOGO_FILE="${PAYLOAD_ROOT}/data/specpine_logo.txt"
 UDEV_RULES_SRC="${PAYLOAD_ROOT}/data/99-wispy.rules"
 UDEV_RULES_DST="/etc/udev/rules.d/99-wispy.rules"
 
@@ -72,6 +70,7 @@ TMP_LOOT_ROOT="/tmp/specpine"
 EVENTS_FILE="/tmp/specpine_events.jsonl"
 BTN_EVT_FILE="/tmp/specpine_btn_evt"
 DPAD_EVT_FILE="/tmp/specpine_dpad_evt"
+DPAD_PENDING_FILE="/tmp/specpine_dpad_pending"
 SCREENSHOT_EVT_FILE="/tmp/specpine_screenshot_evt"
 KEYCKTMP_FILE="/tmp/specpine_keyck.tmp"
 LOG_FILE="/tmp/specpine.log"
@@ -145,7 +144,7 @@ cleanup() {
     pineapple_ensure_running   # safety net: force-resume firmware UI if a renderer left it SIGSTOPped
     LED R 0 G 0 B 0 2>/dev/null || true
     rm -f "$LOCK_FILE" "$PID_FILE" "$EVENTS_FILE" "$BTN_EVT_FILE" "$KEYCKTMP_FILE" \
-          "$DPAD_EVT_FILE" "$SCREENSHOT_EVT_FILE"
+          "$DPAD_EVT_FILE" "$DPAD_PENDING_FILE" "$SCREENSHOT_EVT_FILE"
     if [ "$noloot" = "true" ]; then noloot_wipe; fi
     silent_backup=1
     config_backup
@@ -181,58 +180,44 @@ check_dependencies
 config_check
 settings_check
 
-# ── Boot splash + landing screen (BluePine pattern: payload.sh:400-414) ───
-specpine_logo
+# ── Boot splash, then straight to the menu (BluePine pattern: payload.sh:400-414)
+# Removed: the tap-vs-hold landing gate and its auto-launched default
+# waterfall. On hardware it consistently landed on the waterfall regardless
+# of a tap, and OK couldn't be used to reach the menu at all -- not worth
+# debugging further when the actual goal is simpler: always land on the menu,
+# no auto-launched scan, no button gate to get wrong.
+#
+# Also removed: the ASCII-art logo (specpine_logo, LOG'd line-by-line from
+# data/specpine_logo.txt) that used to print here. Didn't render cleanly on
+# the Pager's small screen and the user asked for it gone outright -- not
+# resized, just removed.
 [ "$mute" = "false" ] && RINGTONE "Flutter"
 
 # Optional framebuffer splash plays first (skips silently if /dev/fb0 missing).
+#
+# Was previously `python3 specpine_splash.py 2>/dev/null || true` -- any
+# error (or a hang) swallowed completely, which matches the "intermittent"
+# symptom reported on hardware (sometimes shows, sometimes doesn't, no trace
+# left behind to diagnose with). Two changes: (1) stderr now goes to
+# $LOG_FILE instead of /dev/null, so a real failure leaves evidence; (2) a
+# 5s watchdog kills it if it hangs, instead of blocking the rest of
+# payload.sh (and the menu) forever behind a stuck splash.
 if [ -e /dev/fb0 ] && [ -x "${PAYLOAD_ROOT}/bin/specpine_splash.py" ]; then
-    python3 "${PAYLOAD_ROOT}/bin/specpine_splash.py" 2>/dev/null || true
+    python3 "${PAYLOAD_ROOT}/bin/specpine_splash.py" >>"$LOG_FILE" 2>&1 &
+    SPLASH_PID=$!
+    SPLASH_DEADLINE=$(( $(date +%s) + 5 ))
+    while kill -0 "$SPLASH_PID" 2>/dev/null && [ "$(date +%s)" -lt "$SPLASH_DEADLINE" ]; do
+        sleep 0.1
+    done
+    if kill -0 "$SPLASH_PID" 2>/dev/null; then
+        echo "[payload] specpine_splash.py exceeded 5s watchdog, killing (pid $SPLASH_PID)" >> "$LOG_FILE"
+        kill -9 "$SPLASH_PID" 2>/dev/null || true
+        pineapple_ensure_running   # in case it died mid-SIGSTOP, holding the screen
+    fi
+    wait "$SPLASH_PID" 2>/dev/null || true
 fi
-
-# Show the landing glyph (theme/glyphs/landing.txt) so the user sees the
-# tap-vs-hold instructions visibly framed.
-show_ansi landing 2>/dev/null || \
-    LOG green "── Tap OK: Waterfall   Hold OK: Menu ──"
-LOG cyan  "(idle 30s also goes to Menu)"
 
 device_probe   # populates WISPY_PRESENT, WISPY_DEVICE_NAME, WISPY_DEVICE_ID
-
-# Tap-vs-hold gate. Re-uses the existing button watcher (start_evtest /
-# check_cancel) so a tap sets is_btn_paused="pause" and a hold ≥0.8s
-# sets is_btn_stopped="stop".
-start_evtest
-sleep 0.3   # drain A-release event from firmware launch screen before watching
-clear_btn_evt
-LANDING_CHOICE=""
-LANDING_DEADLINE=$(( $(date +%s) + 30 ))
-while [ -z "$LANDING_CHOICE" ] && [ "$(date +%s)" -lt "$LANDING_DEADLINE" ]; do
-    check_cancel
-    if is_btn_stopped; then LANDING_CHOICE="menu";      fi
-    if is_btn_paused;  then LANDING_CHOICE="waterfall"; fi
-    sleep 0.15
-done
-# The on-screen prompt promises "(idle 30s also goes to Menu)" -- honor that.
-# Without this, a 30s timeout with no button press at all fell through to
-# the "!= menu" branch below and silently started the waterfall instead,
-# which is why the HUD/menu never appeared on a plain idle-out.
-[ -z "$LANDING_CHOICE" ] && LANDING_CHOICE="menu"
-killall evtest 2>/dev/null || true
-EVTEST_PID=""
-clear_btn_evt
-
-if [ "$LANDING_CHOICE" != "menu" ]; then
-    LOG green "── Starting waterfall (defaults) ──"
-    current_band="$default_band"
-    current_session_name="$(date +%Y%m%d_%H%M%S)"
-    current_save_loot="true"
-    [ "$noloot" = "true" ] && current_save_loot="false"
-    if [ "$default_mode" = "graphical" ] && [ -e /dev/fb0 ]; then
-        graphical_waterfall
-    else
-        text_waterfall
-    fi
-fi
 
 # ── Main menu loop (BluePine pattern: payload.sh:420-965) ─────────────────
 while true; do

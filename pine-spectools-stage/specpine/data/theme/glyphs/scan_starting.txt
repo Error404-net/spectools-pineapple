@@ -1,5 +1,0 @@
-┌─[ ENGAGING SUBSPACE ]───────────────────────┐
-│   > spawning bridge . . . spectool_raw      │
-│   > parsing sweep stream . . . freq lock    │
-│   > rendering . . . phosphor green CRT      │
-└─────────────────────────────────────────────┘

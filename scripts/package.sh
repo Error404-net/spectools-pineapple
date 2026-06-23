@@ -42,7 +42,7 @@ if [ -f "${SRC_PAY}/README.md" ]; then
 fi
 
 # Python helpers (bridge + renderers + splash + theme installer)
-for py in spectools_bridge.py spectools_waterfall_pager.py spectools_waterfall_fb.py spectools_waterfall_http.py specpine_splash.py specpine_theme_install.py specpine_hud.py fb_screenshot.py; do
+for py in spectools_bridge.py spectools_waterfall_pager.py spectools_waterfall_fb.py specpine_splash.py specpine_theme_install.py specpine_hud.py fb_screenshot.py; do
     SRC="${SRC_PAY}/bin/${py}"
     if [ ! -f "$SRC" ]; then
         echo "ERROR: Missing python helper: $SRC"
@@ -80,14 +80,11 @@ done
     ln -sf libusb-1.0.so.0.4.0 libusb-1.0.so.0
 )
 
-# Data files (udev rules, ASCII logo)
+# Data files (udev rules)
 if [ -f "${SRC_PAY}/data/99-wispy.rules" ]; then
     cp "${SRC_PAY}/data/99-wispy.rules" "${STAGE_DIR}/specpine/data/99-wispy.rules"
 elif [ -f "${REPO_ROOT}/99-wispy.rules" ]; then
     cp "${REPO_ROOT}/99-wispy.rules" "${STAGE_DIR}/specpine/data/99-wispy.rules"
-fi
-if [ -f "${SRC_PAY}/data/specpine_logo.txt" ]; then
-    cp "${SRC_PAY}/data/specpine_logo.txt" "${STAGE_DIR}/specpine/data/specpine_logo.txt"
 fi
 
 # ANSI/ASCII LOG art for each scan mode

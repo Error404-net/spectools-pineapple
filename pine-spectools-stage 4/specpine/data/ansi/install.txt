@@ -1,5 +1,0 @@
-┌─[ INSTALL / REPAIR ]────────────────────────┐
-│  > deploy spectool_raw . . . /opt/spectools │
-│  > libusb-0.1 / 1.0 + symlinks              │
-│  > udev rules . . . 99-wispy.rules          │
-└─────────────────────────────────────────────┘

@@ -1,5 +1,0 @@
-┌─[ SCAN STOPPED ]────────────────────────────┐
-│   > bridge halted . . . streams flushed     │
-│   > loot finalised . . . meta.json sealed   │
-│   > shall we play another game?             │
-└─────────────────────────────────────────────┘

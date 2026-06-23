@@ -1,5 +1,0 @@
-┌─[ TEXT WATERFALL ]──────────────────────────┐
-│  > stream . . . live ASCII rows engaged     │
-│  > 50-col density map . space . - = + #     │
-│  > tap OK pause / hold OK stop              │
-└─────────────────────────────────────────────┘

@@ -1,5 +1,0 @@
-┌─[ GRAPHICAL WATERFALL ]─────────────────────┐
-│  > framebuffer . . . 480x222 . engaged      │
-│  > RGB565 . . . 6 fps . phosphor green      │
-│  > vtcon released . hold OK to stop         │
-└─────────────────────────────────────────────┘

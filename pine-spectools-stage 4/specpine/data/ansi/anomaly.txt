@@ -1,5 +1,0 @@
-┌─[ ANOMALY DETECTION ]───────────────────────┐
-│  > baseline . . . moving average . armed    │
-│  > threshold breach → red LED + Warning     │
-│  > GPS-tagged . . . hold OK to stop         │
-└─────────────────────────────────────────────┘

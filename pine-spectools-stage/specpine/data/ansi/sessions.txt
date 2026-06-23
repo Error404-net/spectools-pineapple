@@ -1,5 +1,0 @@
-┌─[ SAVED SESSIONS ]──────────────────────────┐
-│  > vault . . . /root/loot/specpine          │
-│  > view summary . replay . delete           │
-│  > GPS-tagged . . . CSV summary             │
-└─────────────────────────────────────────────┘

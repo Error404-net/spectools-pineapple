@@ -44,22 +44,6 @@ kill_stray_specpine_workers() {
     done
 }
 
-# ── ASCII logo ────────────────────────────────────────────────────────────
-specpine_logo() {
-    if [ -f "$LOGO_FILE" ]; then
-        while IFS= read -r line; do
-            LOG green "$line"
-        done < "$LOGO_FILE"
-    else
-        LOG green " ____                  ____  _            "
-        LOG green "/ ___| _ __   ___  ___|  _ \\(_)_ __   ___ "
-        LOG green "\\___ \\| '_ \\ / _ \\/ __| |_) | | '_ \\ / _ \\"
-        LOG green " ___) | |_) |  __/ (__|  __/| | | | |  __/"
-        LOG green "|____/| .__/ \\___|\\___|_|   |_|_| |_|\\___|"
-        LOG green "      |_|       wi-spy dbx . wargames OK?"
-    fi
-}
-
 # ── Show one of the ASCII art frames. Searches data/ansi/<name>.txt first
 # (per-mode frames) then data/theme/glyphs/<name>.txt (theme tokens). ──
 show_ansi() {
@@ -405,26 +389,56 @@ start_evtest() {
 }
 
 check_cancel() {
-    local press_line press_ts release_line release_ts elapsed_ms i
+    local press_ts release_line release_ts elapsed_ms i
     [ -s "$KEYCKTMP_FILE" ] || return 0
 
-    # Drop anything that isn't a BTN_SOUTH/BTN_EAST line right away. evtest
-    # prints a SYN_REPORT (and other housekeeping) line after every single
-    # event; check_dpad already strips KEY_UP/DOWN/LEFT/RIGHT lines before
-    # this runs, but nothing was ever stripping those SYN_REPORT lines when
-    # no BTN_EAST press happened to be present too -- check_cancel used to
-    # return at the very next grep below without touching the file at all in
-    # that case. Over a long scan with regular d-pad use (no OK/Back presses
-    # in between), $KEYCKTMP_FILE grew by roughly one line per physical
-    # button press for the rest of the session, and every grep here and in
-    # check_dpad re-scans the whole, ever-growing file on a 150ms tick --
-    # consistent with sessions that "glitch"/bog down the longer they run.
+    # Single awk pass does what used to be a filter-grep + cat + rm, plus a
+    # separate grep -q (BTN_SOUTH) and a separate grep|tail (BTN_EAST press)
+    # -- 5-6 forked processes every single tick. On this device's slow,
+    # single-core MIPS CPU, that fork overhead competes directly against
+    # whatever scan renderer is running; during graphical_waterfall
+    # (spectools_waterfall_fb.py, which does real per-pixel framebuffer
+    # writes every frame) that contention was severe enough that OK/Back
+    # presses and LEFT/RIGHT band-switches were getting missed entirely --
+    # the text/ASCII renderer is far lighter on CPU and was not reported
+    # broken, which is the tell. One awk invocation does the filtering AND
+    # the BTN_SOUTH/BTN_EAST detection in a single process.
+    #
+    # Also still does the original job of dropping the SYN_REPORT/housekeeping
+    # lines evtest prints after every event -- check_dpad strips KEY_*, this
+    # strips everything that isn't a BTN_SOUTH/BTN_EAST line, so an
+    # OK/Back-free stretch of pure d-pad use doesn't let $KEYCKTMP_FILE grow
+    # unbounded over a long session ("glitch"/bog-down symptom).
+    #
     # Truncate in place (not mv -- see check_dpad's comment on why) so the
     # live evtest writer's fd stays valid.
-    grep -E "\(BTN_(SOUTH|EAST)\)" "$KEYCKTMP_FILE" > "${KEYCKTMP_FILE}.tmp" 2>/dev/null
+    local cancel_out south_hit
+    cancel_out=$(awk -v tmpf="${KEYCKTMP_FILE}.tmp" '
+        function getts(l,    a,b) {
+            split(l, a, "time "); split(a[2], b, ",")
+            return b[1]
+        }
+        /\(BTN_SOUTH\), value 1/ { south = 1 }
+        /\(BTN_EAST\), value 1/  { press_line = $0 }
+        /\(BTN_SOUTH\)|\(BTN_EAST\)/ { print > tmpf }
+        END {
+            if (south)      print "SOUTH"
+            if (press_line) print "PRESS " getts(press_line)
+        }
+    ' "$KEYCKTMP_FILE")
     cat "${KEYCKTMP_FILE}.tmp" > "$KEYCKTMP_FILE" 2>/dev/null
     rm -f "${KEYCKTMP_FILE}.tmp"
-    [ -s "$KEYCKTMP_FILE" ] || return 0
+
+    south_hit=""
+    press_ts=""
+    while IFS=' ' read -r _kind _val; do
+        case "$_kind" in
+            SOUTH) south_hit=1 ;;
+            PRESS) press_ts="$_val" ;;
+        esac
+    done <<EOF
+$cancel_out
+EOF
 
     # Back / red button. Hardware-verified via evtest: code 304 (BTN_SOUTH)
     # -- distinct from BTN_EAST (305, OK). The Pager firmware itself reacts to
@@ -435,21 +449,13 @@ check_cancel() {
     # Watch BTN_SOUTH here too so Back works as an immediate stop while our
     # own evtest loop owns input, same as a long OK-press. No tap/hold
     # disambiguation needed: Back is a dedicated button, any press stops.
-    if grep -q "(BTN_SOUTH), value 1" "$KEYCKTMP_FILE"; then
+    if [ -n "$south_hit" ]; then
         echo "stop" > "$BTN_EVT_FILE"
         : > "$KEYCKTMP_FILE"
         return 0
     fi
 
-    # Find the most recent OK-button press (BTN_EAST value 1)
-    press_line=$(grep "(BTN_EAST), value 1" "$KEYCKTMP_FILE" | tail -1)
-    [ -z "$press_line" ] && return 0
-
-    press_ts=$(echo "$press_line" | sed -n 's/.*time \([0-9.]*\).*/\1/p')
-    if [ -z "$press_ts" ]; then
-        : > "$KEYCKTMP_FILE"
-        return 0
-    fi
+    [ -z "$press_ts" ] && return 0
 
     # Poll for BTN_EAST release (value 0) for up to 1.2s.
     # Match (BTN_EAST) specifically — not EV_SYN "value 0" lines.
@@ -501,15 +507,48 @@ clear_btn_evt()  { : > "$BTN_EVT_FILE"; }
 check_dpad() {
     [ -s "$KEYCKTMP_FILE" ] || return 0
 
-    local up_line down_line left_line right_line
-    up_line=$(grep "(KEY_UP), value 1" "$KEYCKTMP_FILE" | tail -1)
-    down_line=$(grep "(KEY_DOWN), value 1" "$KEYCKTMP_FILE" | tail -1)
-    left_line=$(grep "(KEY_LEFT), value 1" "$KEYCKTMP_FILE" | tail -1)
-    right_line=$(grep "(KEY_RIGHT), value 1" "$KEYCKTMP_FILE" | tail -1)
+    # Single awk pass replaces what used to be 4 separate grep|tail pipelines
+    # plus 2 sed timestamp extractions plus a final grep -v cleanup -- 7+
+    # forked processes every single tick, run unconditionally regardless of
+    # whether any d-pad key was even pressed. On this device's slow,
+    # single-core MIPS CPU that overhead competes against whatever scan
+    # renderer is running, and was almost certainly contributing to the
+    # graphical waterfall's L/R band-switch and OK/Back-stop becoming
+    # unresponsive (the text/ASCII renderer, much lighter on CPU, was not
+    # reported broken). BTN_SOUTH/BTN_EAST lines are left untouched here --
+    # check_cancel() does its own filtering of those.
+    local dpad_out up_ts down_ts left_hit right_hit _kind _val
+    dpad_out=$(awk -v tmpf="${KEYCKTMP_FILE}.tmp" '
+        function getts(l,    a,b) {
+            split(l, a, "time "); split(a[2], b, ",")
+            return b[1]
+        }
+        /\(KEY_UP\), value 1/    { up_line = $0; next }
+        /\(KEY_DOWN\), value 1/  { down_line = $0; next }
+        /\(KEY_LEFT\), value 1/  { left_hit = 1; next }
+        /\(KEY_RIGHT\), value 1/ { right_hit = 1; next }
+        { print > tmpf }
+        END {
+            if (up_line)    print "UP " getts(up_line)
+            if (down_line)  print "DOWN " getts(down_line)
+            if (left_hit)   print "LEFT"
+            if (right_hit)  print "RIGHT"
+        }
+    ' "$KEYCKTMP_FILE")
+    cat "${KEYCKTMP_FILE}.tmp" > "$KEYCKTMP_FILE" 2>/dev/null
+    rm -f "${KEYCKTMP_FILE}.tmp"
 
-    local up_ts down_ts
-    [ -n "$up_line" ]   && up_ts=$(echo "$up_line"   | sed -n 's/.*time \([0-9.]*\).*/\1/p')
-    [ -n "$down_line" ] && down_ts=$(echo "$down_line" | sed -n 's/.*time \([0-9.]*\).*/\1/p')
+    up_ts=""; down_ts=""; left_hit=""; right_hit=""
+    while IFS=' ' read -r _kind _val; do
+        case "$_kind" in
+            UP)    up_ts="$_val" ;;
+            DOWN)  down_ts="$_val" ;;
+            LEFT)  left_hit=1 ;;
+            RIGHT) right_hit=1 ;;
+        esac
+    done <<EOF
+$dpad_out
+EOF
 
     # This loop polls every ~150ms, but the combo window is 400ms -- two
     # *separate* physical button presses (UP and DOWN) very rarely land in
@@ -565,28 +604,28 @@ check_dpad() {
         fi
     fi
 
-    if [ -n "$left_line" ]; then
+    if [ -n "$left_hit" ]; then
         echo "left" > "$DPAD_EVT_FILE"
-    elif [ -n "$right_line" ]; then
+    elif [ -n "$right_hit" ]; then
         echo "right" > "$DPAD_EVT_FILE"
     fi
 
-    # Consume only the lines we just looked at; leave everything else
-    # (notably any pending BTN_EAST press/release) for check_cancel().
+    # NOTE: the awk pass above already wrote everything that wasn't a
+    # KEY_UP/DOWN/LEFT/RIGHT line out to $KEYCKTMP_FILE (via the cat/rm right
+    # after it runs) -- notably any pending BTN_EAST press/release line is
+    # left intact in there for check_cancel() to see. No separate cleanup
+    # pass needed here anymore.
     #
-    # IMPORTANT: do NOT `mv` a temp file over $KEYCKTMP_FILE here. start_evtest
-    # backgrounds `evtest ... | grep "^Event:" &> "$KEYCKTMP_FILE"`, which opens
-    # that path ONCE and holds the fd open on that inode for the life of the
-    # scan. `mv` replaces the path with a *new* inode -- the live evtest writer
-    # keeps appending to the old, now-pathless inode forever, while every future
-    # read of $KEYCKTMP_FILE (by check_dpad OR check_cancel) sees a file that
-    # never updates again. This was confirmed as the cause of LEFT/RIGHT band
-    # switching going silently dead after the very first dpad check. Truncate
-    # in place (redirect `>` to the existing path) reuses the same inode, so
-    # the background writer's fd stays valid.
-    grep -v -E "\(KEY_(UP|DOWN|LEFT|RIGHT)\)" "$KEYCKTMP_FILE" > "${KEYCKTMP_FILE}.tmp" 2>/dev/null
-    cat "${KEYCKTMP_FILE}.tmp" > "$KEYCKTMP_FILE" 2>/dev/null
-    rm -f "${KEYCKTMP_FILE}.tmp"
+    # IMPORTANT: that cat was a redirect `>` onto the *existing* $KEYCKTMP_FILE
+    # path, never an `mv` of a temp file over it. start_evtest backgrounds
+    # `evtest ... | grep "^Event:" &> "$KEYCKTMP_FILE"`, which opens that path
+    # ONCE and holds the fd open on that inode for the life of the scan. `mv`
+    # would replace the path with a *new* inode -- the live evtest writer
+    # would keep appending to the old, now-pathless inode forever, while every
+    # future read of $KEYCKTMP_FILE (by check_dpad OR check_cancel) would see a
+    # file that never updates again. This was confirmed as the cause of
+    # LEFT/RIGHT band switching going silently dead after the very first dpad
+    # check, so it stays a `>` redirect onto the existing path/inode.
 }
 
 is_dpad_left()           { [ "$(cat "$DPAD_EVT_FILE" 2>/dev/null)" = "left"  ]; }

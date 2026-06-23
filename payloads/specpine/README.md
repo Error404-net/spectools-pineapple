@@ -60,7 +60,6 @@ specpine/
 ├── lib/                       # libusb-{0.1,1.0}.so* + symlinks
 └── data/
     ├── 99-wispy.rules
-    ├── specpine_logo.txt
     ├── ansi/                  # per-mode CRT frames shown via show_ansi
     └── theme/
         ├── theme.sh           # palette tokens + LOG_TITLE/GOOD/WARN/... wrappers
@@ -99,8 +98,8 @@ instead — it's the supported display path.
 
 **Launcher icon is firmware-baked.** The Pac-Man icon shown in the
 "Launch Payload?" dialog is not customisable per payload on this
-firmware. SpecPine's branding is delivered via the boot splash, ASCII
-logo, ANSI glyphs, and waterfall colour scheme. See
+firmware. SpecPine's branding is delivered via the boot splash, ANSI
+glyphs, and waterfall colour scheme. See
 `images/specpine/launcher-icon.md` for the investigation log.
 
 See the repo-root `INSTALL.md` for the full upload walkthrough and
