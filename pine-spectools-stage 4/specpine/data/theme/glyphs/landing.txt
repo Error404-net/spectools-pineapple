@@ -1,0 +1,6 @@
+┌─[ SpecPine ]────────────────────────────────┐
+│   RF intel for the Wi-Spy DBx               │
+│   ── Tap OK: Waterfall                      │
+│   ── Hold OK: Menu                          │
+│   ── Back: Exit                             │
+└─────────────────────────────────────────────┘

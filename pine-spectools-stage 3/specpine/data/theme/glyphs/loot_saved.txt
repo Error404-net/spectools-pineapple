@@ -1,0 +1,5 @@
+┌─[ LOOT ARCHIVED ]───────────────────────────┐
+│   > meta.json . events.jsonl . summary.csv  │
+│   > /root/loot/specpine/session_<TS>/       │
+│   > scp it home for offline analysis        │
+└─────────────────────────────────────────────┘

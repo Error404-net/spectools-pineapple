@@ -87,10 +87,51 @@ Install them to ${DEST_DIR}?")
     LOG green "Ringtones installed"
 }
 
-# ── Main menu (BluePine pattern: funcs_menu.sh:683-763) ───────────────────
+# ── Main menu dispatcher ───────────────────────────────────────────────────
+# Tries the framebuffer HUD first (specpine_hud.py) so the most commonly
+# seen screen is visibly, unmistakably SpecPine instead of the firmware's
+# stock LIST_PICKER chrome. Falls back to the legacy LIST_PICKER menu on
+# any HUD failure (missing /dev/fb0, missing evtest, bad output, etc.) so
+# the user is never stranded with a blank or frozen screen.
+main_menu() {
+    EXIT_PRECONFIRMED=0
+    if [ -x "$HUD_BIN" ] || [ -f "$HUD_BIN" ]; then
+        main_menu_hud
+        [ "$selnum" != "__HUD_FAIL__" ] && return 0
+        LOG yellow "HUD unavailable — falling back to standard menu"
+        pineapple_ensure_running
+    fi
+    main_menu_legacy
+}
+
+# ── Framebuffer HUD main menu ──────────────────────────────────────────────
+main_menu_hud() {
+    [ "$mute" = "false" ] && led_safe MAGENTA
+    local out ec
+    out=$(python3 "$HUD_BIN" --app-version "$APP_VERSION" 2>>"$LOG_FILE")
+    ec=$?
+    case "$ec" in
+        0)
+            case "$out" in
+                ''|*[!0-9]*)
+                    selnum="__HUD_FAIL__"
+                    ;;
+                *)
+                    selnum="$out"
+                    [ "$selnum" -eq 0 ] && EXIT_PRECONFIRMED=1
+                    ;;
+            esac
+            ;;
+        *)
+            selnum="__HUD_FAIL__"
+            ;;
+    esac
+}
+
+# ── Legacy LIST_PICKER main menu (BluePine pattern: funcs_menu.sh:683-763) ─
 # Cancel/Back at LIST_PICKER returns selnum=-1 (no-op in payload.sh dispatch).
 # Only an explicit "Exit" pick triggers selnum=0.
-main_menu() {
+main_menu_legacy() {
     [ "$mute" = "false" ] && led_safe MAGENTA
 
     local items=( "Status" "Quick Scan" "Text Waterfall" "Graphical Waterfall" \
@@ -194,70 +235,65 @@ sub_menu_theme() {
     local theme_dir="/lib/pager/themes"
     local theme_script="${PAYLOAD_ROOT}/bin/specpine_theme_install.py"
 
-    # Detect current state
-    local current_label
-    if [ -L "${theme_dir}/wargames" ]; then
-        local tgt
-        tgt=$(readlink "${theme_dir}/wargames" 2>/dev/null || echo "?")
-        case "$tgt" in
-            *specpine*) current_label="SpecPine (active)" ;;
-            *)          current_label="wargames → ${tgt}" ;;
-        esac
-    else
-        current_label="wargames (default)"
-    fi
-
     while true; do
-        LOG blue "── Theme ──"
-        LOG "Current: ${current_label}"
+        # Detect current state each loop iteration
+        local sp_status
+        if [ -d "${theme_dir}/specpine" ] && [ ! -L "${theme_dir}/specpine" ]; then
+            sp_status="installed"
+        else
+            sp_status="not installed"
+        fi
+
+        LOG blue "── Pager UI Theme ──"
         LOG ""
         LOG cyan "SpecPine theme: teal/cyan accent"
-        LOG cyan "replaces the wargames phosphor-green."
-        LOG "A backup of wargames is kept on-device."
+        LOG "Both themes coexist — switch via:"
+        LOG "Settings → Display → Theme"
+        LOG ""
+        LOG "SpecPine: ${sp_status}"
         WAIT_FOR_BUTTON_PRESS A
 
         local r
         r=$(LIST_PICKER "Theme" \
             "Install SpecPine Theme" \
-            "Restore wargames Theme" \
+            "Remove SpecPine Theme" \
             "Theme Status" \
             "Back")
         case "$r" in
             "Install SpecPine Theme")
                 if [ ! -f "$theme_script" ]; then
-                    ERROR_DIALOG "theme installer not found in payload — redeploy the ZIP"
+                    ERROR_DIALOG "theme installer not found — redeploy the ZIP"
                     continue
                 fi
                 LOG yellow "Installing SpecPine theme …"
-                LOG "This clones wargames, recolours JSON,"
+                LOG "Clones wargames, recolours to teal,"
                 LOG "then restarts the pager service."
                 LOG "Screen will go dark briefly."
                 WAIT_FOR_BUTTON_PRESS A
                 local out ec
                 out=$(python3 "$theme_script" 2>&1); ec=$?
                 if [ "$ec" -eq 0 ]; then
-                    LOG green "SpecPine theme installed."
-                    LOG green "UI restart in progress …"
-                    current_label="SpecPine (active)"
+                    LOG green "SpecPine installed."
+                    LOG green "Use Settings → Display → Theme"
+                    LOG green "to switch to it."
                 else
-                    ERROR_DIALOG "Theme install failed (rc=${ec}) — see LOG"
+                    ERROR_DIALOG "Install failed (rc=${ec}) — see LOG"
                     LOG red "$out"
                 fi
                 ;;
-            "Restore wargames Theme")
+            "Remove SpecPine Theme")
                 if [ ! -f "$theme_script" ]; then
-                    ERROR_DIALOG "theme installer not found in payload — redeploy the ZIP"
+                    ERROR_DIALOG "theme installer not found — redeploy the ZIP"
                     continue
                 fi
-                LOG yellow "Restoring wargames theme …"
+                LOG yellow "Removing SpecPine theme …"
                 WAIT_FOR_BUTTON_PRESS A
                 local out2 ec2
-                out2=$(python3 "$theme_script" --restore 2>&1); ec2=$?
+                out2=$(python3 "$theme_script" --remove 2>&1); ec2=$?
                 if [ "$ec2" -eq 0 ]; then
-                    LOG green "wargames theme restored."
-                    current_label="wargames (default)"
+                    LOG green "SpecPine theme removed."
                 else
-                    ERROR_DIALOG "Restore failed (rc=${ec2}) — see LOG"
+                    ERROR_DIALOG "Remove failed (rc=${ec2}) — see LOG"
                     LOG red "$out2"
                 fi
                 ;;

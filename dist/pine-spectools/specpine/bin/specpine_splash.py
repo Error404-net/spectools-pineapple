@@ -14,11 +14,43 @@ from __future__ import annotations
 
 import os
 import signal
+import subprocess
 import sys
 import time
 
 FB_PATH = "/dev/fb0"
 VTCON   = "/sys/class/vtconsole/vtcon1/bind"
+
+
+def _pineapple_pid() -> int | None:
+    """Return PID of the Pager UI process, or None if not found."""
+    for cmd in (["pidof", "pineapple"], ["pgrep", "-x", "pineapple"],
+                ["pgrep", "-f", "/pineapple/pineapple"]):
+        try:
+            out = subprocess.check_output(cmd, text=True).strip()
+            first = out.split()[0]
+            return int(first)
+        except Exception:
+            continue
+    return None
+
+
+def _pineapple_stop() -> None:
+    pid = _pineapple_pid()
+    if pid:
+        try:
+            os.kill(pid, signal.SIGSTOP)
+        except OSError:
+            pass
+
+
+def _pineapple_cont() -> None:
+    pid = _pineapple_pid()
+    if pid:
+        try:
+            os.kill(pid, signal.SIGCONT)
+        except OSError:
+            pass
 IMG_W, IMG_H = 480, 222
 FB_W,  FB_H  = 222, 480
 FB_BYTES = FB_W * FB_H * 2
@@ -164,12 +196,14 @@ def main() -> int:
         except OSError:
             pass
         _restore_vtcon()
+        _pineapple_cont()
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, _cleanup)
     signal.signal(signal.SIGINT,  _cleanup)
 
     _disable_vtcon()
+    _pineapple_stop()
 
     # Prefer pre-rendered theme frames if present (much faster on the MIPS
     # CPU than the inline drawing fallback below).
@@ -195,6 +229,7 @@ def main() -> int:
         time.sleep(0.4)
         fb_file.close()
         _restore_vtcon()
+        _pineapple_cont()
         return 0
 
     # ── Fallback: inline drawing (original behaviour) ──
@@ -252,6 +287,7 @@ def main() -> int:
 
     fb_file.close()
     _restore_vtcon()
+    _pineapple_cont()
     return 0
 
 

@@ -1,0 +1,5 @@
+┌─[ QUICK SCAN ]──────────────────────────────┐
+│  > sweep . . . single shot . . . engaged    │
+│  > capture window . . . 3 seconds           │
+│  > metrics . . . min / max / avg dBm        │
+└─────────────────────────────────────────────┘

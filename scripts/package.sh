@@ -15,7 +15,12 @@ echo "Output:  $ZIP_OUT"
 echo ""
 
 # ── Clean staging area ────────────────────────────────────────────────────────
-rm -rf "$STAGE_DIR"
+# Some sandboxed/synced filesystems (e.g. Cowork's connected-folder mount)
+# disallow unlinking existing files even though overwriting them via cp is
+# fine. Tolerate a failed rm -rf here -- every file below is recreated by an
+# explicit cp/cp+chmod with a fixed, known filename, so stale leftovers are
+# always overwritten in place rather than silently lingering.
+rm -rf "$STAGE_DIR" 2>/dev/null || true
 mkdir -p \
     "${STAGE_DIR}/specpine/bin" \
     "${STAGE_DIR}/specpine/lib" \
@@ -37,7 +42,7 @@ if [ -f "${SRC_PAY}/README.md" ]; then
 fi
 
 # Python helpers (bridge + renderers + splash + theme installer)
-for py in spectools_bridge.py spectools_waterfall_pager.py spectools_waterfall_fb.py spectools_waterfall_http.py specpine_splash.py specpine_theme_install.py; do
+for py in spectools_bridge.py spectools_waterfall_pager.py spectools_waterfall_fb.py spectools_waterfall_http.py specpine_splash.py specpine_theme_install.py specpine_hud.py fb_screenshot.py; do
     SRC="${SRC_PAY}/bin/${py}"
     if [ ! -f "$SRC" ]; then
         echo "ERROR: Missing python helper: $SRC"
@@ -118,12 +123,19 @@ fi
 cp "${REPO_ROOT}/INSTALL.md" "${STAGE_DIR}/INSTALL.md"
 
 # ── Build zip ─────────────────────────────────────────────────────────────────
+# `zip` finalizes its output by writing a temp file and renaming it over the
+# target -- that rename fails on some sandboxed/synced filesystems (e.g.
+# Cowork's connected-folder mount) even when the target doesn't yet exist.
+# Building in /tmp (a plain local filesystem) sidesteps that, then a final
+# cp (overwrite-in-place, not rename) lands it at $ZIP_OUT.
 echo "Creating zip..."
-rm -f "$ZIP_OUT"
+ZIP_TMP="$(mktemp -d)/pine-spectools.zip"
 (
     cd "${REPO_ROOT}/dist"
-    zip -r -y "$ZIP_OUT" "pine-spectools/" >/dev/null
+    zip -r -y "$ZIP_TMP" "pine-spectools/" >/dev/null
 )
+cp -f "$ZIP_TMP" "$ZIP_OUT"
+rm -f "$ZIP_TMP" 2>/dev/null || true
 
 echo ""
 echo "Done: $ZIP_OUT"

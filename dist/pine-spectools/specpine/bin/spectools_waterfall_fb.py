@@ -18,6 +18,7 @@ Screen layout (logical coordinates, origin = top-left):
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import os
 import signal
@@ -28,7 +29,6 @@ from pathlib import Path
 
 # ── Hardware / layout constants ───────────────────────────────────────────────
 FB_PATH   = "/dev/fb0"
-VTCON     = "/sys/class/vtconsole/vtcon1/bind"
 IMG_W, IMG_H = 480, 222   # logical dimensions
 FB_W,  FB_H  = 222, 480   # physical framebuffer dimensions
 
@@ -85,8 +85,14 @@ def _build_lut() -> list[int]:
         lut.append(rgb565(r, g, b))
     return lut   # len=256; lut[dbm + 128] for any dbm in [-128, 127]
 
-def _lut_lookup(lut: list[int], dbm: int) -> int:
-    return lut[max(0, min(255, dbm + 128))]
+def _lut_lookup(lut: list[int], dbm: float) -> int:
+    # rssi_bins from spectool_raw / mock_sweep are floats (e.g. -78.3); the LUT
+    # is indexed by integer dBm, so round before indexing. Without this cast,
+    # any non-integer bin value raises "TypeError: list indices must be
+    # integers or slices, not float" the moment real sweep data arrives --
+    # the ASCII renderer (spectools_waterfall_pager.py) has the equivalent
+    # int(round(...)) cast for the same reason.
+    return lut[max(0, min(255, int(round(dbm)) + 128))]
 
 # ── Bitmap font (5 × 7 px, 1 bit/pixel) ──────────────────────────────────────
 # Each glyph = 7 ints; bit 4 = leftmost column, bit 0 = rightmost
@@ -183,14 +189,29 @@ def _vline_dotted(fb: bytearray, lx: int, y0: int, y1: int, packed: int) -> None
     for ly in range(y0, y1 + 1, 2):
         _put(fb, lx, ly, packed)
 
-# ── Wi-Fi 2.4 GHz channel positions ──────────────────────────────────────────
+# ── Wi-Fi channel positions (2.4 GHz and 5 GHz) ──────────────────────────────
+# The Wi-Spy DBx is a single-radio swept analyzer — it sweeps one fixed range
+# at a time (see band_to_range_index() in funcs_main.sh / wispy_hw_dbx.c's
+# wispydbx_add_supportedranges()). Whichever range is active arrives here via
+# the "device_config" event's freq_start_khz/freq_end_khz, so the tick marks
+# below must be computed against the *actual* current sweep range, not a
+# hardcoded 2.4GHz assumption — otherwise 5GHz sweeps render with channel
+# ticks computed against the wrong axis (or none visible at all).
 
 def _freq_to_x(freq_mhz: float, start_mhz: float = 2400.0,
                end_mhz: float = 2483.5) -> int:
+    if end_mhz <= start_mhz:
+        return 0
     return int((freq_mhz - start_mhz) / (end_mhz - start_mhz) * (IMG_W - 1))
 
 # Non-overlapping channels for 2.4 GHz (MHz centres)
-_WIFI_CHANNELS = {1: 2412, 6: 2437, 11: 2462}
+_WIFI_CHANNELS_24 = {1: 2412, 6: 2437, 11: 2462}
+# UNII-1 / UNII-3 channels for 5 GHz (MHz centres) — matches the marker set
+# already used by the ASCII renderer (spectools_waterfall_pager.py _CH_5G)
+_WIFI_CHANNELS_5 = {
+    36: 5180, 40: 5200, 44: 5220, 48: 5240,
+    149: 5745, 153: 5765, 157: 5785, 161: 5805,
+}
 
 # ── Static frame builder (title, legend, freq marks, channel ticks) ───────────
 
@@ -212,11 +233,20 @@ def build_static(fb: bytearray, freq_start_khz: int | None,
     # Thin divider line under title
     _hline(fb, 0, IMG_W - 1, TITLE_Y1, rgb565(*C_TEAL))
 
-    # Wi-Fi channel tick marks and dotted guide lines
+    # Wi-Fi channel tick marks and dotted guide lines.
+    # Select the 2.4GHz or 5GHz marker set based on the *actual* current
+    # sweep range (device_config/sweep events), not a hardcoded assumption --
+    # mirrors spectools_waterfall_pager.py's freq_header() ch_map selection.
     teal = rgb565(*C_TEAL)
     gray = rgb565(*C_GRAY)
-    for ch_num, ch_mhz in _WIFI_CHANNELS.items():
-        cx = _freq_to_x(ch_mhz)
+    start_mhz = freq_start_khz / 1000.0 if freq_start_khz else 2400.0
+    end_mhz = freq_end_khz / 1000.0 if freq_end_khz else 2483.5
+    channels = _WIFI_CHANNELS_5 if (freq_start_khz and freq_start_khz >= 3_000_000) \
+        else _WIFI_CHANNELS_24
+    for ch_num, ch_mhz in channels.items():
+        if not (start_mhz <= ch_mhz <= end_mhz):
+            continue
+        cx = _freq_to_x(ch_mhz, start_mhz, end_mhz)
         # Tick in tick zone
         _fill(fb, cx - 1, TICK_Y0, 3, TICK_Y1 - TICK_Y0 + 1, teal)
         # Dotted guide through waterfall
@@ -287,33 +317,34 @@ def sweep_to_row(bins: list[int], lut: list[int]) -> list[int]:
 
 # ── Waterfall + status drawing ────────────────────────────────────────────────
 
-def draw_waterfall(fb: bytearray, ring: deque) -> None:
-    """Redraw waterfall region from ring buffer (newest sweep at bottom).
+def draw_new_sweep(fb: bytearray, row: list[int], ring_len: int) -> None:
+    """Scroll the waterfall right by one column and insert `row` (the newest
+    sweep) at the left edge of the waterfall region.
 
-    Iterates by FB row (= frequency bin = lx) to use stride-based addressing,
-    avoiding repeated multiplication in the inner loop.
+    This replaces what used to be a full O(IMG_W * WFALL_ROWS) Python-level
+    rebuild on *every* frame (up to 480*162 = 77,760 plain-Python iterations)
+    with O(IMG_W) bytearray slice shifts -- each shift is a single C-level
+    memmove instead of an inner Python loop. That rebuild-every-frame cost
+    was the dominant reason the renderer measured ~1.5-2s/frame on this
+    device's MIPS CPU. Call this once per incoming sweep (cheap, unthrottled);
+    `flush_fb()`/`draw_status()` remain the only fps-gated, I/O-bound steps.
+
+    `ring_len` is the ring's length *after* appending this sweep (the caller
+    uses a deque(maxlen=WFALL_ROWS), so this naturally caps at WFALL_ROWS
+    once the ring is full and older columns silently scroll off the right
+    edge of the waterfall).
     """
-    # Blank empty rows at the top when the ring is not yet full
-    if len(ring) < WFALL_ROWS:
-        _fill(fb, 0, WFALL_Y0, IMG_W, WFALL_ROWS - len(ring), rgb565(*C_BLACK))
-
-    n = len(ring)
-    # Pre-materialise ring as a list for fast index access
-    ring_list = list(ring)  # ring_list[0] = newest
-
-    # col for newest sweep in the framebuffer: 221 - WFALL_Y1 = 221 - 181 = 40
-    # col for oldest sweep in the framebuffer: 221 - (WFALL_Y1 - (n-1)) = 40 + n - 1
-    base_col = 221 - WFALL_Y1   # = 40
+    base_col = 221 - WFALL_Y1   # = 40, newest column within each physical row
+    n_after = min(ring_len, WFALL_ROWS)
+    shift_n = n_after - 1        # existing columns that need to shift right by one
 
     for lx in range(IMG_W):
-        # FB row = lx; each step along t increments the FB column by 1.
-        # Starting byte offset for this row at base_col:
-        off = (lx * 222 + base_col) * 2
-        for t in range(n):
-            packed = ring_list[t][lx]
-            fb[off]     = packed & 0xFF
-            fb[off + 1] = packed >> 8
-            off += 2   # advance one FB column (same row)
+        off = (lx * FB_W + base_col) * 2
+        if shift_n > 0:
+            fb[off + 2 : off + 2 + shift_n * 2] = fb[off : off + shift_n * 2]
+        packed = row[lx]
+        fb[off]     = packed & 0xFF
+        fb[off + 1] = packed >> 8
 
 
 def draw_status(fb: bytearray, sweep_count: int, peak: int | None,
@@ -329,45 +360,77 @@ def draw_status(fb: bytearray, sweep_count: int, peak: int | None,
         _text(fb, f"Peak:{peak}dBm", 160, STATUS_Y0 + 5, teal)
     _text(fb, state[:12], 340, STATUS_Y0 + 5, gray)
 
-# ── vtconsole control ─────────────────────────────────────────────────────────
+# ── Pager UI suspend/resume ───────────────────────────────────────────────────
+# The Pager's /pineapple/pineapple process owns /dev/fb0 and repaints every
+# ~750ms.  SIGSTOP it before writing frames; SIGCONT on exit to restore the UI.
+# evtest reads /dev/input/event0 directly from the kernel — button input
+# continues to work while pineapple is stopped.
 
-def vtcon_disable() -> None:
+def _pineapple_pid() -> int | None:
+    import subprocess
+    for cmd in (["pidof", "pineapple"], ["pgrep", "-x", "pineapple"],
+                ["pgrep", "-f", "/pineapple/pineapple"]):
+        try:
+            out = subprocess.check_output(cmd, text=True).strip()
+            first = out.split()[0]
+            return int(first)
+        except Exception:
+            continue
+    # Fallback: pidof/pgrep may be missing from PATH, or behave differently,
+    # depending on the process tree the renderer was launched from (real menu
+    # launch vs. an interactive SSH shell). Scan /proc directly as a last
+    # resort instead of silently giving up.
     try:
-        with open(VTCON, "w") as f:
-            f.write("0\n")
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/comm", "r") as f:
+                    comm = f.read().strip()
+            except OSError:
+                continue
+            if comm == "pineapple":
+                return int(entry)
     except OSError:
         pass
+    return None
 
-def vtcon_enable() -> None:
-    try:
-        with open(VTCON, "w") as f:
-            f.write("1\n")
-    except OSError:
-        pass
+def pineapple_stop() -> None:
+    pid = _pineapple_pid()
+    if pid:
+        try:
+            os.kill(pid, signal.SIGSTOP)
+            print(f"[fb] pineapple (pid {pid}) SIGSTOPped", file=sys.stderr)
+        except OSError as e:
+            print(f"[fb] pineapple (pid {pid}) SIGSTOP failed: {e}", file=sys.stderr)
+    else:
+        print("[fb] WARNING: pineapple process not found via pidof/pgrep/proc scan -- "
+              "the native UI may keep repainting over our frames and nothing will "
+              "appear to change on screen", file=sys.stderr)
+
+def pineapple_cont() -> None:
+    pid = _pineapple_pid()
+    if pid:
+        try:
+            os.kill(pid, signal.SIGCONT)
+            print(f"[fb] pineapple (pid {pid}) SIGCONTinued", file=sys.stderr)
+        except OSError as e:
+            print(f"[fb] pineapple (pid {pid}) SIGCONT failed: {e}", file=sys.stderr)
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description="Pager framebuffer spectrum waterfall")
-    p.add_argument("--events-file", default="/tmp/spectools_bridge_events.jsonl")
-    p.add_argument("--follow", action="store_true", help="Tail events file")
-    p.add_argument("--poll-interval", type=float, default=0.05)
-    p.add_argument("--fps",  type=int, default=6, help="Target display refresh rate")
-    p.add_argument("--no-vtcon", action="store_true",
-                   help="Skip vtconsole disable (useful for testing)")
-    args = p.parse_args(argv)
-
-    # Graceful shutdown on signals
-    running = [True]
-    def _stop(*_):
-        running[0] = False
-    signal.signal(signal.SIGINT,  _stop)
-    signal.signal(signal.SIGTERM, _stop)
-
-    lut = _build_lut()
-    fb  = bytearray(FB_W * FB_H * 2)
+def _run_session(events_path: Path, args, lut: list[int], fb: bytearray,
+                  flush_fb, running: list[bool], reload_flag: list[bool]) -> None:
+    """One band/session's worth of rendering: wait for the events file, then
+    tail it and incrementally draw sweeps until told to stop (`running[0]`
+    goes False) or reload (`reload_flag[0]` goes True, e.g. a live band
+    switch from the LEFT/RIGHT buttons -- see check_dpad()/graphical_waterfall()
+    in funcs_main.sh/funcs_scan.sh). Returning here without exiting the
+    process lets main() loop back and pick up a freshly-restarted bridge's
+    events file without paying this device's ~8-10s Python startup cost on
+    every band switch.
+    """
     ring: deque[list[int]] = deque(maxlen=WFALL_ROWS)
-
     freq_start: int | None = None
     freq_end:   int | None = None
     sweep_count = 0
@@ -375,48 +438,34 @@ def main(argv: list[str] | None = None) -> int:
     state = "INIT"
 
     build_static(fb, freq_start, freq_end)
+    _fill(fb, 0, WFALL_Y0, IMG_W, WFALL_ROWS, rgb565(*C_BLACK))
+    draw_status(fb, sweep_count, peak, state)
+    flush_fb(fb)
 
-    if not args.no_vtcon:
-        vtcon_disable()
-
-    def flush_fb() -> None:
-        try:
-            with open(FB_PATH, "wb") as dev:
-                dev.write(fb)
-        except OSError as exc:
-            # Fall back to LOG-style stderr message so the shell wrapper can log it
-            print(f"[fb] write error: {exc}", file=sys.stderr, flush=True)
-
-    flush_fb()
-
-    events_path = Path(args.events_file)
     if not events_path.exists():
         state = "WAITING"
-        draw_status(fb, 0, None, state)
-        flush_fb()
-        while not events_path.exists() and running[0]:
+        draw_status(fb, sweep_count, peak, state)
+        flush_fb(fb)
+        while not events_path.exists() and running[0] and not reload_flag[0]:
             time.sleep(0.5)
 
-    if not running[0]:
-        vtcon_enable()
-        return 0
+    if not running[0] or reload_flag[0]:
+        return
 
     frame_interval = 1.0 / max(args.fps, 1)
     last_draw = 0.0
     dirty = False
 
     with events_path.open("r", encoding="utf-8") as fh:
-        while running[0]:
+        while running[0] and not reload_flag[0]:
             raw = fh.readline()
             if not raw:
                 if args.follow:
                     time.sleep(args.poll_interval)
-                    # Draw if dirty and frame interval elapsed
                     now = time.time()
                     if dirty and now - last_draw >= frame_interval:
-                        draw_waterfall(fb, ring)
                         draw_status(fb, sweep_count, peak, state)
-                        flush_fb()
+                        flush_fb(fb)
                         last_draw = now
                         dirty = False
                     continue
@@ -438,6 +487,7 @@ def main(argv: list[str] | None = None) -> int:
                 if evt.get("freq_end_khz") is not None:
                     freq_end = evt["freq_end_khz"]
                 build_static(fb, freq_start, freq_end)
+                _fill(fb, 0, WFALL_Y0, IMG_W, WFALL_ROWS, rgb565(*C_BLACK))
                 dirty = True
 
             elif etype == "sweep" and state != "PAUSED":
@@ -450,6 +500,7 @@ def main(argv: list[str] | None = None) -> int:
                 if bins:
                     row = sweep_to_row(bins, lut)
                     ring.appendleft(row)   # newest first
+                    draw_new_sweep(fb, row, len(ring))   # cheap; unthrottled
                     sweep_count += 1
                     peak = max(bins)
                     state = "SCANNING"
@@ -460,21 +511,81 @@ def main(argv: list[str] | None = None) -> int:
                 dirty = True
 
             elif etype == "status":
-                lvl = evt.get("level", "info")
                 if "stall" in str(evt.get("message", "")).lower():
                     state = "STALLED"
                     dirty = True
 
             now = time.time()
             if dirty and now - last_draw >= frame_interval:
-                draw_waterfall(fb, ring)
                 draw_status(fb, sweep_count, peak, state)
-                flush_fb()
+                flush_fb(fb)
                 last_draw = now
                 dirty = False
 
-    if not args.no_vtcon:
-        vtcon_enable()
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(description="Pager framebuffer spectrum waterfall")
+    p.add_argument("--events-file", default="/tmp/spectools_bridge_events.jsonl")
+    p.add_argument("--follow", action="store_true", help="Tail events file")
+    p.add_argument("--poll-interval", type=float, default=0.05)
+    p.add_argument("--fps",  type=int, default=6, help="Target display refresh rate")
+    p.add_argument("--no-ui-stop", action="store_true",
+                   help="Skip SIGSTOP of pineapple UI (useful for testing)")
+    args = p.parse_args(argv)
+
+    # Graceful shutdown on signals — always resume the Pager UI on exit
+    running = [True]
+    def _stop(*_):
+        running[0] = False
+        if not args.no_ui_stop:
+            pineapple_cont()
+    signal.signal(signal.SIGINT,  _stop)
+    signal.signal(signal.SIGTERM, _stop)
+
+    # SIGUSR1 = live band switch (sent by graphical_waterfall() after it has
+    # restarted the bridge with a new --range). Doesn't exit the interpreter —
+    # just unwinds the current _run_session() so main() can start a fresh one
+    # against the new events file, avoiding this device's ~8-10s Python/import
+    # startup cost on every LEFT/RIGHT band switch.
+    reload_flag = [False]
+    def _reload(*_):
+        reload_flag[0] = True
+    signal.signal(signal.SIGUSR1, _reload)
+
+    lut = _build_lut()
+    fb  = bytearray(FB_W * FB_H * 2)
+
+    if not args.no_ui_stop:
+        pineapple_stop()
+        # Belt-and-suspenders: atexit fires on *any* interpreter shutdown path —
+        # normal return, sys.exit(), or an uncaught exception unwinding out of
+        # main() — not just the SIGINT/SIGTERM cases the signal handler above
+        # covers. pineapple_cont() is idempotent (SIGCONT to an already-running
+        # process is a no-op), so registering it here is safe even though the
+        # explicit calls below will often also fire. This does NOT protect
+        # against SIGKILL/-9 or OOM-kill, since the process never gets to run
+        # exit handlers in that case — that's covered by the independent
+        # pineapple_ensure_running() shell-level check in funcs_main.sh, called
+        # from payload.sh's cleanup trap and from graphical_waterfall().
+        atexit.register(pineapple_cont)
+
+    def flush_fb(buf: bytearray) -> None:
+        try:
+            with open(FB_PATH, "r+b", buffering=0) as dev:
+                dev.seek(0)
+                dev.write(buf)
+        except OSError as exc:
+            # Fall back to LOG-style stderr message so the shell wrapper can log it
+            print(f"[fb] write error: {exc}", file=sys.stderr, flush=True)
+
+    events_path = Path(args.events_file)
+
+    while running[0]:
+        reload_flag[0] = False
+        _run_session(events_path, args, lut, fb, flush_fb, running, reload_flag)
+
+    if not args.no_ui_stop:
+        pineapple_cont()
     return 0
 
 

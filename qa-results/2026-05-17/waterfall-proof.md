@@ -132,3 +132,4 @@ The waterfall's graphical output renders to `/dev/fb0` (the physical screen on t
 
 **No screenshots captured** — see notes above. All evidence is from SSH/shell output.
 
+c

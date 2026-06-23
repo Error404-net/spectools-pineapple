@@ -58,13 +58,6 @@ text_waterfall() {
         show_menu_end_OK=2
         return 1
     fi
-    # Launch the browser-based graphical waterfall server on port 8080.
-    local http_ip
-    http_ip=$(ip -4 addr show br-lan 2>/dev/null | awk '/inet /{sub("/.*","",$2); print $2; exit}')
-    [ -z "$http_ip" ] && http_ip="172.16.52.1"
-    python3 "$RENDERER_HTTP_BIN" --events-file "$EVENTS_FILE" >> "$LOG_FILE" 2>&1 &
-    HTTP_PID=$!
-    LOG cyan "Graphical: http://${http_ip}:8080/"
     start_evtest
     ringtone_play "GlitchHack"
     led_safe R 0 G 255 B 0
@@ -101,7 +94,6 @@ text_waterfall() {
                 2>/dev/null)
 
     stop_bridge
-    [ -n "$HTTP_PID" ] && { kill "$HTTP_PID" 2>/dev/null || true; HTTP_PID=""; }
     killall evtest 2>/dev/null || true
     EVTEST_PID=""
     clear_btn_evt
@@ -124,12 +116,22 @@ graphical_waterfall() {
         show_menu_end_OK=2
         return 1
     fi
+    # Normalize the "auto" sentinel to a real band ("2.4") right away.
+    # band_to_range_index() already treats auto==2.4 for the actual device
+    # sweep, but the LEFT/RIGHT toggle below only ever compares against the
+    # literal string "5" ("if current_band = 5 then 2.4 else 5") -- left as
+    # "auto", that comparison still resolves correctly on the very first
+    # press, but every status line and the renderer's on-screen state used
+    # "auto" instead of the band actually being swept, which is what made
+    # "Auto" look like it wasn't really tracking/switching bands. Pin it to
+    # a concrete value up front so display and toggle logic agree.
+    [ "$current_band" = "auto" ] && current_band="2.4"
     make_session_dir "${current_session_name:-fb}"
     mark_session_started "$SESSION_DIR" "graphical"
     show_ansi graphical_waterfall
     LOG blue "── Graphical Waterfall ──"
     LOG       "Display takes over. Hold OK ≥0.8s to stop."
-    if ! start_bridge "$SESSION_DIR"; then
+    if ! start_bridge "$SESSION_DIR" "$current_band"; then
         mark_session_failed "$SESSION_DIR" "graphical"
         LOG yellow "Session log: $SESSION_DIR"
         show_menu_end_OK=2
@@ -138,6 +140,7 @@ graphical_waterfall() {
     start_evtest
     ringtone_play "GlitchHack"
     led_safe R 0 G 255 B 0
+    LOG cyan  "LEFT/RIGHT: switch 2.4/5GHz   UP+DOWN: screenshot"
 
     python3 "$RENDERER_FB_BIN" \
         --events-file "$EVENTS_FILE" \
@@ -147,23 +150,108 @@ graphical_waterfall() {
         >> "$LOG_FILE" 2>&1 &
     RENDERER_PID=$!
 
+    clear_dpad_evt
+    clear_screenshot_evt
+    local shot_n=0
+
+    # Stall watchdog: if EVENTS_FILE stops growing (bridge died, USB hiccup,
+    # device went unresponsive mid-sweep) the renderer just sits there idle
+    # forever with pineapple still SIGSTOPped -- a silent, total UI freeze
+    # indistinguishable from a crash. Detect via file size, not wall clock,
+    # so a slow-but-alive feed never false-trips this.
+    local last_evt_size=-1 last_evt_growth stall_limit
+    last_evt_growth=$(date +%s)
+    stall_limit=$(( stall_timeout * 3 ))
+    [ "$stall_limit" -lt 15 ] && stall_limit=15
+
     while kill -0 "$RENDERER_PID" 2>/dev/null; do
+        check_dpad
         check_cancel
         if is_btn_stopped; then
             kill "$RENDERER_PID" 2>/dev/null || true
             break
         fi
-        sleep 0.5
+
+        local cur_evt_size
+        cur_evt_size=$(wc -c < "$EVENTS_FILE" 2>/dev/null || echo -1)
+        if [ "$cur_evt_size" != "$last_evt_size" ]; then
+            last_evt_size="$cur_evt_size"
+            last_evt_growth=$(date +%s)
+        elif [ $(( $(date +%s) - last_evt_growth )) -ge "$stall_limit" ]; then
+            LOG red "Feed stalled (${stall_limit}s no data) -- recovering"
+            stop_bridge
+            if start_bridge "$SESSION_DIR" "$current_band"; then
+                kill -USR1 "$RENDERER_PID" 2>/dev/null || true
+                LOG yellow "Feed restarted: ${current_band} GHz"
+                last_evt_size=-1
+                last_evt_growth=$(date +%s)
+            else
+                LOG red "Feed recovery failed -- stopping scan: ${BRIDGE_FAIL_REASON:-unknown}"
+                kill "$RENDERER_PID" 2>/dev/null || true
+                break
+            fi
+        fi
+
+        if is_dpad_left || is_dpad_right; then
+            local new_band old_band
+            old_band="$current_band"
+            if [ "$current_band" = "5" ]; then
+                new_band="2.4"
+            else
+                new_band="5"
+            fi
+            clear_dpad_evt
+            LOG yellow "Switching band: ${current_band} → ${new_band}"
+            stop_bridge
+            current_band="$new_band"
+            if start_bridge "$SESSION_DIR" "$current_band"; then
+                kill -USR1 "$RENDERER_PID" 2>/dev/null || true
+                LOG green "Now scanning: ${current_band} GHz"
+            else
+                # Band switch failed (e.g. Wi-Spy busy re-tuning). start_bridge
+                # already rm -f'd EVENTS_FILE before trying, so the renderer's
+                # open file handle now points at a deleted inode -- readline()
+                # would return EOF forever, the display would never update
+                # again, and pineapple stays SIGSTOPped indefinitely (looks
+                # exactly like a full freeze). Fall back to restarting the
+                # OLD band so the feed recovers instead of dying silently.
+                LOG red "Band switch failed: ${BRIDGE_FAIL_REASON:-unknown}"
+                current_band="$old_band"
+                if start_bridge "$SESSION_DIR" "$current_band"; then
+                    kill -USR1 "$RENDERER_PID" 2>/dev/null || true
+                    LOG yellow "Reverted to: ${current_band} GHz"
+                else
+                    LOG red "Recovery failed too -- stopping scan: ${BRIDGE_FAIL_REASON:-unknown}"
+                    kill "$RENDERER_PID" 2>/dev/null || true
+                    break
+                fi
+            fi
+        fi
+
+        if is_screenshot_requested; then
+            clear_screenshot_evt
+            shot_n=$((shot_n+1))
+            local shot_path="${SESSION_DIR}/screenshot_$(date +%Y%m%d_%H%M%S)_${shot_n}.bmp"
+            if python3 "$FB_SCREENSHOT_BIN" "$shot_path" >> "$LOG_FILE" 2>&1; then
+                LOG green "Screenshot saved: ${shot_path##*/}"
+                ringtone_play "Achievement"
+            else
+                LOG red "Screenshot failed (see log)"
+            fi
+        fi
+
+        sleep 0.15
     done
     wait "$RENDERER_PID" 2>/dev/null
     RENDERER_PID=""
-    sleep 0.3
-    [ -e "$VTCON" ] && echo 1 > "$VTCON" 2>/dev/null || true
+    pineapple_ensure_running   # belt-and-suspenders: renderer's own SIGCONT may not have fired
 
     stop_bridge
     killall evtest 2>/dev/null || true
     EVTEST_PID=""
     clear_btn_evt
+    clear_dpad_evt
+    clear_screenshot_evt
 
     if [ "$current_save_loot" = "true" ] && [ -f "$EVENTS_FILE" ]; then
         cp "$EVENTS_FILE" "${SESSION_DIR}/events.jsonl" 2>/dev/null || true

@@ -13,7 +13,21 @@
 # Press Back (Pager) to bail out at any prompt.
 # ──────────────────────────────────────────────────────────────────────────
 
-PAYLOAD_ROOT="$(cd "$(dirname "$0")" && pwd)"
+PAYLOAD_SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "${PAYLOAD_SELF_DIR}/include/funcs_main.sh" ]; then
+    PAYLOAD_ROOT="$PAYLOAD_SELF_DIR"
+else
+    # The Pager firmware stages a standalone copy of this script into /tmp
+    # (e.g. /tmp/payload-<rand>.sh) and executes THAT, without copying the
+    # sibling include/bin/data directories alongside it. When that happens,
+    # $0 points at the /tmp staging copy, so dirname-based resolution would
+    # silently point PAYLOAD_ROOT at /tmp and break every `source` below
+    # (confirmed live via `ps`: the running process is /bin/bash
+    # /tmp/payload-<rand>.sh, and /tmp/include/funcs_main.sh does not
+    # exist). Fall back to the known install location used by every
+    # deploy in this repo (see CLAUDE.md's deploy command).
+    PAYLOAD_ROOT="/root/payloads/user/reconnaissance/specpine"
+fi
 
 # Source modular helpers (BluePine pattern: payload.sh:172-175)
 source "${PAYLOAD_ROOT}/include/funcs_main.sh"
@@ -46,7 +60,9 @@ fi
 BRIDGE_BIN="${PAYLOAD_ROOT}/bin/spectools_bridge.py"
 RENDERER_ASCII_BIN="${PAYLOAD_ROOT}/bin/spectools_waterfall_pager.py"
 RENDERER_FB_BIN="${PAYLOAD_ROOT}/bin/spectools_waterfall_fb.py"
+FB_SCREENSHOT_BIN="${PAYLOAD_ROOT}/bin/fb_screenshot.py"
 RENDERER_HTTP_BIN="${PAYLOAD_ROOT}/bin/spectools_waterfall_http.py"
+HUD_BIN="${PAYLOAD_ROOT}/bin/specpine_hud.py"
 LOGO_FILE="${PAYLOAD_ROOT}/data/specpine_logo.txt"
 UDEV_RULES_SRC="${PAYLOAD_ROOT}/data/99-wispy.rules"
 UDEV_RULES_DST="/etc/udev/rules.d/99-wispy.rules"
@@ -55,11 +71,12 @@ LOOT_ROOT="/root/loot/specpine"
 TMP_LOOT_ROOT="/tmp/specpine"
 EVENTS_FILE="/tmp/specpine_events.jsonl"
 BTN_EVT_FILE="/tmp/specpine_btn_evt"
+DPAD_EVT_FILE="/tmp/specpine_dpad_evt"
+SCREENSHOT_EVT_FILE="/tmp/specpine_screenshot_evt"
 KEYCKTMP_FILE="/tmp/specpine_keyck.tmp"
 LOG_FILE="/tmp/specpine.log"
 LOCK_FILE="/tmp/specpine.lock"
 PID_FILE="/tmp/specpine.pid"
-VTCON="/sys/class/vtconsole/vtcon1/bind"
 
 APP_VERSION="1.2"
 CONFIG_NS="specpine"
@@ -83,13 +100,13 @@ total_anomalies=0
 BRIDGE_PID=""
 RENDERER_PID=""
 EVTEST_PID=""
-HTTP_PID=""
 selnum=0
 show_menu_end_OK=1
 current_band=""
 current_session_name=""
 current_save_loot="false"
 SESSION_DIR=""
+EXIT_PRECONFIRMED=0
 WISPY_PRESENT="false"
 WISPY_DEVICE_NAME=""
 WISPY_DEVICE_ID=""
@@ -121,16 +138,14 @@ cleanup() {
     [ -n "$RENDERER_PID" ] && kill "$RENDERER_PID" 2>/dev/null || true
     [ -n "$BRIDGE_PID" ]   && kill "$BRIDGE_PID"   2>/dev/null || true
     [ -n "$EVTEST_PID" ]   && kill "$EVTEST_PID"   2>/dev/null || true
-    [ -n "$HTTP_PID" ]     && kill "$HTTP_PID"     2>/dev/null || true
-    pkill -f "spectools_bridge.py"          2>/dev/null || true
-    pkill -f "spectools_waterfall_pager.py" 2>/dev/null || true
-    pkill -f "spectools_waterfall_fb.py"    2>/dev/null || true
-    pkill -f "spectools_waterfall_http.py"  2>/dev/null || true
+    # Fallback: kill any orphaned SpecPine python3 workers by matching args
+    # (ps w, not plain ps -- see kill_stray_specpine_workers() in funcs_main.sh)
+    kill_stray_specpine_workers
     killall evtest 2>/dev/null || true
-    sleep 0.3
-    [ -e "$VTCON" ] && echo 1 > "$VTCON" 2>/dev/null || true
+    pineapple_ensure_running   # safety net: force-resume firmware UI if a renderer left it SIGSTOPped
     LED R 0 G 0 B 0 2>/dev/null || true
-    rm -f "$LOCK_FILE" "$PID_FILE" "$EVENTS_FILE" "$BTN_EVT_FILE" "$KEYCKTMP_FILE"
+    rm -f "$LOCK_FILE" "$PID_FILE" "$EVENTS_FILE" "$BTN_EVT_FILE" "$KEYCKTMP_FILE" \
+          "$DPAD_EVT_FILE" "$SCREENSHOT_EVT_FILE"
     if [ "$noloot" = "true" ]; then noloot_wipe; fi
     silent_backup=1
     config_backup
@@ -150,6 +165,13 @@ touch "$LOCK_FILE"
 echo $$ > "$PID_FILE"
 : > "$LOG_FILE"
 : > "$BTN_EVT_FILE"
+
+# A previous run that crashed, got SIGKILL'd, or was killed mid-test can leave
+# a renderer/bridge orphaned and still holding /dev/fb0 with pineapple
+# SIGSTOPped -- a fresh launch should never inherit that state. Reap any
+# stray workers and force-resume the firmware UI before doing anything else.
+kill_stray_specpine_workers
+pineapple_ensure_running
 
 mkdir -p "$LOOT_ROOT" "$TMP_LOOT_ROOT" 2>/dev/null || true
 
@@ -190,6 +212,11 @@ while [ -z "$LANDING_CHOICE" ] && [ "$(date +%s)" -lt "$LANDING_DEADLINE" ]; do
     if is_btn_paused;  then LANDING_CHOICE="waterfall"; fi
     sleep 0.15
 done
+# The on-screen prompt promises "(idle 30s also goes to Menu)" -- honor that.
+# Without this, a 30s timeout with no button press at all fell through to
+# the "!= menu" branch below and silently started the waterfall instead,
+# which is why the HUD/menu never appeared on a plain idle-out.
+[ -z "$LANDING_CHOICE" ] && LANDING_CHOICE="menu"
 killall evtest 2>/dev/null || true
 EVTEST_PID=""
 clear_btn_evt
@@ -200,7 +227,11 @@ if [ "$LANDING_CHOICE" != "menu" ]; then
     current_session_name="$(date +%Y%m%d_%H%M%S)"
     current_save_loot="true"
     [ "$noloot" = "true" ] && current_save_loot="false"
-    text_waterfall
+    if [ "$default_mode" = "graphical" ] && [ -e /dev/fb0 ]; then
+        graphical_waterfall
+    else
+        text_waterfall
+    fi
 fi
 
 # ── Main menu loop (BluePine pattern: payload.sh:420-965) ─────────────────
@@ -211,17 +242,23 @@ while true; do
 
     case "$main_option" in
         1)  status_display ;;
-        2)  if pre_scan_dialog; then quick_scan;        fi ;;
-        3)  if pre_scan_dialog; then text_waterfall;    fi ;;
-        4)  if pre_scan_dialog; then channel_analysis;  fi ;;
-        5)  if pre_scan_dialog; then anomaly_detection; fi ;;
-        6)  sub_menu_sessions ;;
-        7)  sub_menu_install ;;
-        8)  sub_menu_settings ;;
-        9)  sub_menu_about ;;
+        2)  if pre_scan_dialog; then quick_scan;           fi ;;
+        3)  if pre_scan_dialog; then text_waterfall;       fi ;;
+        4)  if pre_scan_dialog; then graphical_waterfall;  fi ;;
+        5)  if pre_scan_dialog; then channel_analysis;     fi ;;
+        6)  if pre_scan_dialog; then anomaly_detection;    fi ;;
+        7)  sub_menu_sessions ;;
+        8)  sub_menu_install ;;
+        9)  sub_menu_settings ;;
+        10) sub_menu_about ;;
         0)
-            resp=$(CONFIRMATION_DIALOG "Exit SpecPine?")
-            if [ "$resp" = "$DUCKYSCRIPT_USER_CONFIRMED" ]; then
+            if [ "$EXIT_PRECONFIRMED" -eq 1 ]; then
+                confirmed=1
+            else
+                resp=$(CONFIRMATION_DIALOG "Exit SpecPine?")
+                [ "$resp" = "$DUCKYSCRIPT_USER_CONFIRMED" ] && confirmed=1 || confirmed=0
+            fi
+            if [ "$confirmed" -eq 1 ]; then
                 LOG cyan "── shall we play a game? ──"
                 [ "$mute" = "false" ] && RINGTONE "Flutter"
                 exit 0   # trap → cleanup

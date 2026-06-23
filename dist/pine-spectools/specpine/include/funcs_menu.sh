@@ -87,18 +87,54 @@ Install them to ${DEST_DIR}?")
     LOG green "Ringtones installed"
 }
 
-# ── Main menu (BluePine pattern: funcs_menu.sh:683-763) ───────────────────
+# ── Main menu dispatcher ───────────────────────────────────────────────────
+# Tries the framebuffer HUD first (specpine_hud.py) so the most commonly
+# seen screen is visibly, unmistakably SpecPine instead of the firmware's
+# stock LIST_PICKER chrome. Falls back to the legacy LIST_PICKER menu on
+# any HUD failure (missing /dev/fb0, missing evtest, bad output, etc.) so
+# the user is never stranded with a blank or frozen screen.
+main_menu() {
+    EXIT_PRECONFIRMED=0
+    if [ -x "$HUD_BIN" ] || [ -f "$HUD_BIN" ]; then
+        main_menu_hud
+        [ "$selnum" != "__HUD_FAIL__" ] && return 0
+        LOG yellow "HUD unavailable — falling back to standard menu"
+        pineapple_ensure_running
+    fi
+    main_menu_legacy
+}
+
+# ── Framebuffer HUD main menu ──────────────────────────────────────────────
+main_menu_hud() {
+    [ "$mute" = "false" ] && led_safe MAGENTA
+    local out ec
+    out=$(python3 "$HUD_BIN" --app-version "$APP_VERSION" 2>>"$LOG_FILE")
+    ec=$?
+    case "$ec" in
+        0)
+            case "$out" in
+                ''|*[!0-9]*)
+                    selnum="__HUD_FAIL__"
+                    ;;
+                *)
+                    selnum="$out"
+                    [ "$selnum" -eq 0 ] && EXIT_PRECONFIRMED=1
+                    ;;
+            esac
+            ;;
+        *)
+            selnum="__HUD_FAIL__"
+            ;;
+    esac
+}
+
+# ── Legacy LIST_PICKER main menu (BluePine pattern: funcs_menu.sh:683-763) ─
 # Cancel/Back at LIST_PICKER returns selnum=-1 (no-op in payload.sh dispatch).
 # Only an explicit "Exit" pick triggers selnum=0.
-main_menu() {
+main_menu_legacy() {
     [ "$mute" = "false" ] && led_safe MAGENTA
 
-    # NOTE: "Graphical Waterfall" is intentionally absent from the primary menu.
-    # On Pager firmware 24.10.1 the framebuffer renderer is overwritten in
-    # real-time by the Pager UI overlay (no vtcon1, no firmware suppression
-    # API). The function is preserved under Settings → Diagnostics for
-    # power-user investigation. See payloads/specpine/README.md.
-    local items=( "Status" "Quick Scan" "Text Waterfall" \
+    local items=( "Status" "Quick Scan" "Text Waterfall" "Graphical Waterfall" \
                   "Channel Analysis" "Anomaly Detection" "Saved Sessions" \
                   "Install" "Settings" "About" "Exit" )
     local pick_str="\"SpecPine - Main Menu\""
@@ -111,17 +147,18 @@ main_menu() {
     local resp
     resp=$(eval "LIST_PICKER ${pick_str}")
     case "$resp" in
-        "Status")              selnum=1  ;;
-        "Quick Scan")          selnum=2  ;;
-        "Text Waterfall")      selnum=3  ;;
-        "Channel Analysis")    selnum=4  ;;
-        "Anomaly Detection")   selnum=5  ;;
-        "Saved Sessions")      selnum=6  ;;
-        "Install")             selnum=7  ;;
-        "Settings")            selnum=8  ;;
-        "About")               selnum=9  ;;
-        "Exit")                selnum=0  ;;
-        *)                     selnum=-1 ;;   # cancelled/back → loop without exit
+        "Status")                selnum=1  ;;
+        "Quick Scan")            selnum=2  ;;
+        "Text Waterfall")        selnum=3  ;;
+        "Graphical Waterfall")   selnum=4  ;;
+        "Channel Analysis")      selnum=5  ;;
+        "Anomaly Detection")     selnum=6  ;;
+        "Saved Sessions")        selnum=7  ;;
+        "Install")               selnum=8  ;;
+        "Settings")              selnum=9  ;;
+        "About")                 selnum=10 ;;
+        "Exit")                  selnum=0  ;;
+        *)                       selnum=-1 ;;   # cancelled/back → loop without exit
     esac
 }
 
@@ -167,6 +204,7 @@ sub_menu_settings() {
             "Anomaly Threshold" "Anomaly Window" \
             "Mute" "No-loot Mode" "GPS" \
             "Skip Ringtone Check" \
+            "Theme" \
             "Diagnostics" \
             "Reset to Defaults" "Back")
         case "$resp" in
@@ -180,11 +218,95 @@ sub_menu_settings() {
             "No-loot Mode")        setting_noloot ;;
             "GPS")                 setting_gps ;;
             "Skip Ringtone Check") setting_skip_ringtones ;;
+            "Theme")               sub_menu_theme ;;
             "Diagnostics")         sub_menu_diagnostics ;;
             "Reset to Defaults")   setting_reset_defaults ;;
             *)                     return ;;
         esac
         config_backup
+    done
+}
+
+# ── Theme submenu ─────────────────────────────────────────────────────────────
+# Detects the active theme via the /lib/pager/themes/wargames symlink target,
+# then offers Install / Restore.  The actual heavy lifting is in
+# payloads/specpine/bin/specpine_theme_install.py (bundled in the ZIP).
+sub_menu_theme() {
+    local theme_dir="/lib/pager/themes"
+    local theme_script="${PAYLOAD_ROOT}/bin/specpine_theme_install.py"
+
+    while true; do
+        # Detect current state each loop iteration
+        local sp_status
+        if [ -d "${theme_dir}/specpine" ] && [ ! -L "${theme_dir}/specpine" ]; then
+            sp_status="installed"
+        else
+            sp_status="not installed"
+        fi
+
+        LOG blue "── Pager UI Theme ──"
+        LOG ""
+        LOG cyan "SpecPine theme: teal/cyan accent"
+        LOG "Both themes coexist — switch via:"
+        LOG "Settings → Display → Theme"
+        LOG ""
+        LOG "SpecPine: ${sp_status}"
+        WAIT_FOR_BUTTON_PRESS A
+
+        local r
+        r=$(LIST_PICKER "Theme" \
+            "Install SpecPine Theme" \
+            "Remove SpecPine Theme" \
+            "Theme Status" \
+            "Back")
+        case "$r" in
+            "Install SpecPine Theme")
+                if [ ! -f "$theme_script" ]; then
+                    ERROR_DIALOG "theme installer not found — redeploy the ZIP"
+                    continue
+                fi
+                LOG yellow "Installing SpecPine theme …"
+                LOG "Clones wargames, recolours to teal,"
+                LOG "then restarts the pager service."
+                LOG "Screen will go dark briefly."
+                WAIT_FOR_BUTTON_PRESS A
+                local out ec
+                out=$(python3 "$theme_script" 2>&1); ec=$?
+                if [ "$ec" -eq 0 ]; then
+                    LOG green "SpecPine installed."
+                    LOG green "Use Settings → Display → Theme"
+                    LOG green "to switch to it."
+                else
+                    ERROR_DIALOG "Install failed (rc=${ec}) — see LOG"
+                    LOG red "$out"
+                fi
+                ;;
+            "Remove SpecPine Theme")
+                if [ ! -f "$theme_script" ]; then
+                    ERROR_DIALOG "theme installer not found — redeploy the ZIP"
+                    continue
+                fi
+                LOG yellow "Removing SpecPine theme …"
+                WAIT_FOR_BUTTON_PRESS A
+                local out2 ec2
+                out2=$(python3 "$theme_script" --remove 2>&1); ec2=$?
+                if [ "$ec2" -eq 0 ]; then
+                    LOG green "SpecPine theme removed."
+                else
+                    ERROR_DIALOG "Remove failed (rc=${ec2}) — see LOG"
+                    LOG red "$out2"
+                fi
+                ;;
+            "Theme Status")
+                local st
+                st=$(python3 "$theme_script" --status 2>&1)
+                LOG blue "── Theme Status ──"
+                LOG "$st"
+                WAIT_FOR_BUTTON_PRESS A
+                ;;
+            *)
+                return ;;
+        esac
     done
 }
 
@@ -199,35 +321,18 @@ sub_menu_diagnostics() {
             "Test LIST_PICKER" \
             "Test Settings Persist" \
             "Test Bridge Dry-run" \
-            "Graphical Waterfall (broken)" \
             "Back")
         case "$r" in
-            "Test Button Watcher")          diag_test_button_watcher ;;
-            "Test Framebuffer")             diag_test_framebuffer ;;
-            "Test LIST_PICKER")             diag_test_list_picker ;;
-            "Test Settings Persist")        diag_test_settings_persist ;;
-            "Test Bridge Dry-run")          diag_test_bridge_dryrun ;;
-            "Graphical Waterfall (broken)") diag_graphical_waterfall ;;
-            *)                              return ;;
+            "Test Button Watcher")  diag_test_button_watcher ;;
+            "Test Framebuffer")     diag_test_framebuffer ;;
+            "Test LIST_PICKER")     diag_test_list_picker ;;
+            "Test Settings Persist") diag_test_settings_persist ;;
+            "Test Bridge Dry-run")  diag_test_bridge_dryrun ;;
+            *)                      return ;;
         esac
     done
 }
 
-diag_graphical_waterfall() {
-    LOG blue   "── Graphical Waterfall (broken on 24.10.1) ──"
-    LOG yellow "This firmware has no /sys/class/vtconsole/vtcon1"
-    LOG yellow "and no API to suppress the Pager UI overlay."
-    LOG yellow "Pixels we draw to /dev/fb0 are overwritten by"
-    LOG yellow "the firmware's title bar / payload-log strip."
-    LOG       ""
-    LOG "Launch anyway? (Use 'Text Waterfall' instead.)"
-    local r
-    r=$(CONFIRMATION_DIALOG "Run anyway (will likely flicker)?")
-    if [ "$r" = "$DUCKYSCRIPT_USER_CONFIRMED" ]; then
-        if pre_scan_dialog; then graphical_waterfall; fi
-    fi
-    show_menu_end_OK=2
-}
 
 diag_test_button_watcher() {
     LOG blue "── Button Watcher Test ──"

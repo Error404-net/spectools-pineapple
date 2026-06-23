@@ -1,0 +1,5 @@
+┌─[ SETTINGS ]────────────────────────────────┐
+│  > band . mode . stall . restarts           │
+│  > anomaly . mute . no-loot . GPS           │
+│  > diagnostics . reset to defaults          │
+└─────────────────────────────────────────────┘

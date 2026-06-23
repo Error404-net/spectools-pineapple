@@ -42,7 +42,16 @@ sshpass -p qwerty scp pine-spectools.zip root@172.16.52.1:/root/
 sshpass -p qwerty ssh root@172.16.52.1 'cd /tmp && unzip -o /root/pine-spectools.zip && \
   rm -rf /root/payloads/user/reconnaissance/specpine && \
   cp -r pine-spectools/specpine /root/payloads/user/reconnaissance/specpine && \
-  chmod 755 /root/payloads/user/reconnaissance/specpine/{payload.sh,bin/*.py,bin/spectool_raw,bin/spectool_net}'
+  chmod 755 /root/payloads/user/reconnaissance/specpine/payload.sh && \
+  chmod 755 /root/payloads/user/reconnaissance/specpine/bin/*.py && \
+  chmod 755 /root/payloads/user/reconnaissance/specpine/bin/spectool_raw && \
+  chmod 755 /root/payloads/user/reconnaissance/specpine/bin/spectool_net'
+```
+Note: the device's remote shell is BusyBox `ash`, which does **not** support bash
+brace expansion (`{a,b,c}`) — a single combined `chmod ... {payload.sh,bin/*.py,...}`
+will silently fail with "No such file or directory" because the whole `{...}`
+string gets treated as one literal filename. Always use separate `chmod`
+invocations (or a `find`) when targeting multiple paths on-device.
 ```
 
 **Smoke-test `spectool_raw` against a plugged-in Wi-Spy** (uses payload-local libs — no `/opt` install required):

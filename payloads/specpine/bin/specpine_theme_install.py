@@ -2,13 +2,18 @@
 """
 SpecPine Theme Installer — runs ON the Pager.
 
-Clones /lib/pager/themes/wargames → specpine, patches colours
-(shifts phosphor-green palette to teal/cyan), then symlink-swaps
-wargames → specpine and hot-restarts the pager service.
+Creates /lib/pager/themes/specpine alongside (not replacing) the existing
+wargames theme, patches colours (shifts phosphor-green → teal/cyan), and
+restarts pineapplepager so the firmware's Theme selector lists both options.
+
+The firmware scans /lib/pager/themes/ for directories, so having two real
+directories means the user can switch between them via Settings → Display →
+Theme without SpecPine replacing wargames.
 
 Usage (from the Pager shell):
     python3 /root/payloads/user/reconnaissance/specpine/bin/specpine_theme_install.py
     python3 /root/payloads/user/reconnaissance/specpine/bin/specpine_theme_install.py --restore
+    python3 /root/payloads/user/reconnaissance/specpine/bin/specpine_theme_install.py --status
 
 Called automatically by the SpecPine "Settings → Theme" menu.
 """
@@ -29,31 +34,33 @@ SPECPINE   = THEME_DIR / "specpine"
 
 # ── Colour palette: wargames phosphor-green → SpecPine teal/cyan ─────────────
 # The wargames theme encodes colours as {"r": N, "g": N, "b": N} objects
-# and as plain RGB arrays [R, G, B] inside component JSONs.
-# We shift:
-#   primary green  (0, 220, 100) → teal        (0, 200, 180)
-#   dim green      (0, 140,  60) → dim teal     (0, 130, 150)
-#   dark green     (0,  70,  30) → dark navy    (0,  50, 100)
-#   bright green   (0, 255, 120) → bright cyan  (0, 220, 220)
-#   soft_white     (230,230,220) → cool-white   (220,240,240)  ← status bar text
-#   amber          (255,180, 40) → amber kept (it's the Pager warning colour)
+# (in theme.json color_palette and inline in component JSONs) and as [R,G,B]
+# arrays. We detect wargames-green by hue (high G, low B relative to G) and
+# shift it to teal/cyan by blending blue up from the green channel.
 #
-# We match the wargames-green hue: g > r*1.5 and b < g*0.6 and g > 100
-# and remap it to a teal/cyan equivalent.
+#   primary green  (0, 220, 80)  → teal       (0, 194, 185)
+#   dim green      (0, 140, 50)  → dim teal   (0, 123, 122)
+#   bright green   (0, 255, 120) → cyan       (0, 224, 221)
+#
+# Colours that aren't green-family (reds, whites, ambers, navies) pass through.
 
 def _is_wargames_green(r: int, g: int, b: int) -> bool:
-    """True if this colour reads as the wargames phosphor-green family."""
-    return g > 100 and g > r * 1.5 and b < g * 0.6
+    """True if this colour belongs to the wargames phosphor-green family.
+
+    Criteria: green-dominant, not neutral, and blue is clearly less than green.
+    We use strict thresholds to avoid accidentally recolouring reds or whites.
+    """
+    return g >= 80 and g > r * 1.4 and b < g * 0.65 and g > b + 30
 
 def _remap(r: int, g: int, b: int) -> tuple[int, int, int]:
-    """Shift a wargames-green colour into SpecPine teal."""
+    """Shift a wargames-green colour into SpecPine teal/cyan."""
     if not _is_wargames_green(r, g, b):
         return r, g, b
-    # Keep luminance (roughly), tilt hue from green toward cyan:
-    #   new_b ≈ b + (g - b) * 0.8   (borrow from the green channel)
-    new_b = min(255, int(b + (g - b) * 0.80))
-    new_g = min(255, int(g * 0.88))   # soften green slightly
-    new_r = r                          # red stays (usually 0)
+    # Tilt hue from green toward cyan by boosting blue toward the green level.
+    # Slight green reduction keeps the overall luminance stable.
+    new_b = min(255, int(b + (g - b) * 0.86))
+    new_g = min(255, int(g * 0.88))
+    new_r = r  # red stays (usually 0 in wargames)
     return new_r, new_g, new_b
 
 
@@ -120,49 +127,35 @@ def patch_theme_root(theme_path: Path) -> int:
     return changed
 
 
-# ── Symlink swap ──────────────────────────────────────────────────────────────
+# ── Theme management ─────────────────────────────────────────────────────────
+# Strategy: side-by-side real directories.
+# The firmware scans /lib/pager/themes/ for subdirectories and lists all of
+# them in Settings → Display → Theme. We create specpine/ as a separate real
+# directory alongside wargames/ — no symlink swap needed. The user switches
+# themes using the firmware's own selector.
 
-def install() -> int:
-    print("=== SpecPine Theme Installer ===")
+def _ensure_wargames_is_real_dir() -> bool:
+    """Make sure wargames exists as a real directory (not a symlink).
 
-    if not WARGAMES.exists() and not WARGAMES.is_symlink():
-        print(f"ERROR: {WARGAMES} not found — cannot clone base theme.")
-        return 1
+    If wargames is currently a symlink (from a previous installer run) or is
+    missing, restore it from wargames.bak. Returns True on success.
+    """
+    if WARGAMES.is_symlink():
+        print("  wargames is a symlink — unlinking …")
+        WARGAMES.unlink()
 
-    # Step 1 — preserve original wargames (once)
-    if not WARGAMES_BAK.exists():
-        print(f"Backing up wargames → {WARGAMES_BAK} …")
-        # If wargames is already our symlink, back up specpine instead
-        real_src = WARGAMES.resolve() if WARGAMES.is_symlink() else WARGAMES
-        shutil.copytree(str(real_src), str(WARGAMES_BAK))
-        print("  Backup done.")
-    else:
-        print(f"  Backup already exists at {WARGAMES_BAK}")
+    if not WARGAMES.exists():
+        if not WARGAMES_BAK.exists():
+            print(f"ERROR: {WARGAMES} missing and no backup to restore from.")
+            return False
+        print(f"  Restoring wargames from {WARGAMES_BAK} …")
+        shutil.copytree(str(WARGAMES_BAK), str(WARGAMES))
 
-    # Step 2 — create/refresh specpine directory from the backup
-    if SPECPINE.exists():
-        print(f"  Removing stale {SPECPINE} …")
-        shutil.rmtree(str(SPECPINE))
-    print(f"Cloning wargames.bak → {SPECPINE} …")
-    shutil.copytree(str(WARGAMES_BAK), str(SPECPINE))
-    print("  Clone done.")
+    return True
 
-    # Step 3 — patch colours
-    print("Patching SpecPine colours (green → teal) …")
-    n = patch_theme_root(SPECPINE)
-    print(f"  {n} JSON file(s) patched.")
 
-    # Step 4 — activate: replace wargames with symlink → specpine
-    print("Activating SpecPine theme (symlink swap) …")
-    if WARGAMES.exists() or WARGAMES.is_symlink():
-        if WARGAMES.is_symlink():
-            WARGAMES.unlink()
-        else:
-            shutil.rmtree(str(WARGAMES))
-    WARGAMES.symlink_to(SPECPINE)
-    print(f"  {WARGAMES} → {SPECPINE}")
-
-    # Step 5 — restart pager service
+def _restart_pager() -> None:
+    """Hot-restart pineapplepager so it rescans the themes directory."""
     print("Restarting pineapplepager …")
     ret = subprocess.call(["service", "pineapplepager", "restart"],
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -172,52 +165,97 @@ def install() -> int:
         print(f"  Warning: service restart returned {ret} — try manually:")
         print("    service pineapplepager restart")
 
-    print("=== SpecPine theme active ===")
+
+def install() -> int:
+    print("=== SpecPine Theme Installer ===")
+
+    # Step 1 — ensure we have a clean wargames backup to clone from
+    if WARGAMES_BAK.exists():
+        print(f"  Backup already present at {WARGAMES_BAK}")
+    else:
+        src = WARGAMES.resolve() if WARGAMES.is_symlink() else WARGAMES
+        if not src.exists():
+            print(f"ERROR: {WARGAMES} not found — cannot clone base theme.")
+            return 1
+        print(f"Backing up wargames → {WARGAMES_BAK} …")
+        shutil.copytree(str(src), str(WARGAMES_BAK))
+        print("  Backup done.")
+
+    # Step 2 — ensure wargames is a real directory (un-symlink if needed)
+    if not _ensure_wargames_is_real_dir():
+        return 1
+
+    # Step 3 — create/refresh specpine from the backup
+    if SPECPINE.exists():
+        print(f"  Removing stale {SPECPINE} …")
+        shutil.rmtree(str(SPECPINE))
+    print(f"Cloning wargames.bak → {SPECPINE} …")
+    shutil.copytree(str(WARGAMES_BAK), str(SPECPINE))
+    print("  Clone done.")
+
+    # Step 4 — patch colours in specpine only (wargames stays vanilla)
+    print("Patching SpecPine colours (green → teal/cyan) …")
+    n = patch_theme_root(SPECPINE)
+    print(f"  {n} JSON file(s) patched.")
+
+    # Step 5 — restart so the firmware rescans /lib/pager/themes/
+    # After restart, Settings → Display → Theme will list both wargames and specpine.
+    _restart_pager()
+
+    print("=== SpecPine theme installed ===")
+    print("  Switch to it via: Settings → Display → Theme → specpine")
+    return 0
+
+
+def remove() -> int:
+    """Remove the specpine theme directory. wargames is left untouched."""
+    print("=== Removing SpecPine theme ===")
+
+    if not SPECPINE.exists():
+        print("  specpine not installed — nothing to do.")
+        return 0
+
+    print(f"Removing {SPECPINE} …")
+    shutil.rmtree(str(SPECPINE))
+
+    # Also clean up any leftover symlink in case wargames is still pointing at it
+    if WARGAMES.is_symlink():
+        print("  Detected stale wargames symlink — restoring real directory …")
+        _ensure_wargames_is_real_dir()
+
+    _restart_pager()
+    print("=== SpecPine theme removed ===")
     return 0
 
 
 def restore() -> int:
-    print("=== Restoring wargames theme ===")
-
-    if not WARGAMES_BAK.exists():
-        print(f"ERROR: no backup at {WARGAMES_BAK} — nothing to restore.")
-        return 1
-
-    print("Removing current wargames (or symlink) …")
-    if WARGAMES.exists() or WARGAMES.is_symlink():
-        if WARGAMES.is_symlink():
-            WARGAMES.unlink()
-        else:
-            shutil.rmtree(str(WARGAMES))
-
-    print(f"Restoring from {WARGAMES_BAK} …")
-    shutil.copytree(str(WARGAMES_BAK), str(WARGAMES))
-
-    print("Restarting pineapplepager …")
-    subprocess.call(["service", "pineapplepager", "restart"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    print("=== wargames theme restored ===")
-    return 0
+    """Alias for remove() — kept for backward compatibility."""
+    return remove()
 
 
 def status() -> None:
-    wg_is_link = WARGAMES.is_symlink()
-    wg_target  = os.readlink(str(WARGAMES)) if wg_is_link else "(real dir)"
-    bak_exists = WARGAMES_BAK.exists()
-    sp_exists  = SPECPINE.exists()
+    themes = sorted(
+        p.name for p in THEME_DIR.iterdir()
+        if (p.is_dir() or p.is_symlink()) and not p.name.startswith(".")
+    ) if THEME_DIR.exists() else []
 
-    print(f"wargames   : {'→ ' + wg_target if wg_is_link else 'real directory'}")
-    print(f"specpine   : {'present' if sp_exists else 'not installed'}")
-    print(f"backup     : {'present' if bak_exists else 'none'}")
-    if wg_is_link and str(WARGAMES.resolve()) == str(SPECPINE):
-        print("active     : SpecPine")
-    else:
-        print("active     : wargames (default)")
+    print(f"themes dir : {THEME_DIR}")
+    for t in themes:
+        p = THEME_DIR / t
+        if p.is_symlink():
+            print(f"  {t:20s} → {os.readlink(str(p))}  (symlink)")
+        else:
+            print(f"  {t:20s}   (real dir)")
+
+    sp_installed = SPECPINE.exists() and not SPECPINE.is_symlink()
+    wg_ok        = WARGAMES.exists() and not WARGAMES.is_symlink()
+    print(f"specpine   : {'installed' if sp_installed else 'not installed'}")
+    print(f"wargames   : {'real dir (OK)' if wg_ok else 'symlink or missing (run install to fix)'}")
+    print(f"backup     : {'present' if WARGAMES_BAK.exists() else 'none'}")
 
 
 if __name__ == "__main__":
-    if "--restore" in sys.argv:
+    if "--restore" in sys.argv or "--remove" in sys.argv:
         sys.exit(restore())
     elif "--status" in sys.argv:
         status()

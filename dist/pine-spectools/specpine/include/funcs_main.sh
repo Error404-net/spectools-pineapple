@@ -6,6 +6,44 @@ if [ -f "${PAYLOAD_ROOT}/data/theme/theme.sh" ]; then
     source "${PAYLOAD_ROOT}/data/theme/theme.sh"
 fi
 
+# ── Stray-worker reaper ────────────────────────────────────────────────────
+# Kill any spectools_bridge.py / spectools_waterfall_*.py processes by name,
+# regardless of whether this script currently tracks their PID. Needed in two
+# places: (1) once at startup, in case a previous run crashed, got kill -9'd,
+# or otherwise left a renderer orphaned and still holding /dev/fb0 with
+# pineapple SIGSTOPped -- a fresh launch should never inherit that; (2) in the
+# cleanup() trap, as a fallback alongside the tracked-PID kills.
+#
+# MUST use `ps w`, not plain `ps`: BusyBox `ps` truncates the COMMAND column
+# on a narrow/non-pty session, and these scripts' full installed path
+# (/root/payloads/user/reconnaissance/specpine/bin/spectools_waterfall_fb.py)
+# is long enough to get cut off before the matched substring -- which made
+# this fallback silently never catch anything. Confirmed live: a stray
+# graphical waterfall renderer kept running (still drawing, pineapple still
+# stopped) even after the whole payload had exited and the menu was gone.
+# NOTE: also matches spectool_raw|spectool_net -- the actual MIPS binaries
+# the bridge launches as a *subprocess* (via Python's subprocess.Popen).
+# bridge.py's SIGTERM handler only flips a `stop` flag and unwinds its own
+# read loop; it never explicitly kills its spectool_raw child, and Python
+# does not auto-kill children when the parent dies. So a killed/crashed
+# bridge can leave spectool_raw running and still holding an exclusive
+# libusb claim on the Wi-Spy -- confirmed live: `ps` showed two orphaned
+# spectool_raw processes from earlier sessions, and every scan after that
+# failed with "no device_config/sweep data" (looked like a USB/hardware
+# fault, but spectool_raw run by hand against the same idle device worked
+# instantly). Reaping by name here, not just by tracked PID, is what catches
+# that case.
+kill_stray_specpine_workers() {
+    local _pid
+    for _pid in $(ps w 2>/dev/null | awk '/spectools_bridge|spectools_waterfall|spectool_raw|spectool_net/{print $1}'); do
+        kill "$_pid" 2>/dev/null || true
+    done
+    sleep 0.3
+    for _pid in $(ps w 2>/dev/null | awk '/spectools_bridge|spectools_waterfall|spectool_raw|spectool_net/{print $1}'); do
+        kill -9 "$_pid" 2>/dev/null || true
+    done
+}
+
 # ── ASCII logo ────────────────────────────────────────────────────────────
 specpine_logo() {
     if [ -f "$LOGO_FILE" ]; then
@@ -85,6 +123,9 @@ device_probe() {
 
 # ── Capture first device_config event from a brief bridge run ─────────────
 device_config_dump() {
+    local band="${1:-${default_band:-auto}}"
+    local range_idx
+    range_idx=$(band_to_range_index "$band")
     FREQ_START_KHZ=""
     FREQ_END_KHZ=""
     BIN_COUNT=""
@@ -93,7 +134,7 @@ device_config_dump() {
     local tmp_events="/tmp/specpine_probe.jsonl"
     rm -f "$tmp_events"
     LD_LIBRARY_PATH="$SPECTOOL_LIB" python3 "$BRIDGE_BIN" \
-        --input-command "$SPECTOOL_BIN" \
+        --input-command "${SPECTOOL_BIN} --range ${range_idx}" \
         --events-file "$tmp_events" \
         --stall-timeout 4 \
         --max-restarts 1 \
@@ -347,6 +388,8 @@ EOF
 start_evtest() {
     : > "$KEYCKTMP_FILE"
     : > "$BTN_EVT_FILE"
+    : > "$DPAD_EVT_FILE"
+    : > "$SCREENSHOT_EVT_FILE"
     if [ ! -e /dev/input/event0 ]; then
         # Best-effort fallback
         local cand
@@ -356,32 +399,61 @@ start_evtest() {
     else
         ((evtest /dev/input/event0 | grep "^Event:" &> "$KEYCKTMP_FILE") &) > /dev/null 2>&1
     fi
-    EVTEST_PID="$(pgrep -n evtest 2>/dev/null)"
+    # pgrep not on BusyBox; pidof works and returns newest PID last
+    EVTEST_PID="$(pidof evtest 2>/dev/null | awk '{print $NF}')"
 }
 
 check_cancel() {
-    local press_line release_line press_ts release_ts elapsed_ms
+    local press_line press_ts release_line release_ts elapsed_ms i
     [ -s "$KEYCKTMP_FILE" ] || return 0
+
+    # Back / red button. Hardware-verified via evtest: code 304 (BTN_SOUTH)
+    # -- distinct from BTN_EAST (305, OK). The Pager firmware itself reacts to
+    # Back at native LIST_PICKER/dialog prompts ("Press Back to bail out"),
+    # but during a framebuffer takeover (graphical_waterfall etc.) the
+    # firmware's own UI process is SIGSTOPped, so it can only queue the event
+    # and flash its exit dialog once resumed -- it can't actually act on it.
+    # Watch BTN_SOUTH here too so Back works as an immediate stop while our
+    # own evtest loop owns input, same as a long OK-press. No tap/hold
+    # disambiguation needed: Back is a dedicated button, any press stops.
+    if grep -q "(BTN_SOUTH), value 1" "$KEYCKTMP_FILE"; then
+        echo "stop" > "$BTN_EVT_FILE"
+        : > "$KEYCKTMP_FILE"
+        return 0
+    fi
+
+    # Find the most recent OK-button press (BTN_EAST value 1)
     press_line=$(grep "(BTN_EAST), value 1" "$KEYCKTMP_FILE" | tail -1)
     [ -z "$press_line" ] && return 0
+
     press_ts=$(echo "$press_line" | sed -n 's/.*time \([0-9.]*\).*/\1/p')
-    [ -z "$press_ts" ] && return 0
-    release_line=$(awk -v ts="$press_ts" '
-        / value 0/ { split($0,a,"time "); split(a[2],b,","); if (b[1]+0 > ts+0) { print; exit } }
-    ' "$KEYCKTMP_FILE")
-    if [ -z "$release_line" ]; then
-        sleep 0.3
-        release_line=$(awk -v ts="$press_ts" '
-            / value 0/ { split($0,a,"time "); split(a[2],b,","); if (b[1]+0 > ts+0) { print; exit } }
-        ' "$KEYCKTMP_FILE")
+    if [ -z "$press_ts" ]; then
+        : > "$KEYCKTMP_FILE"
+        return 0
     fi
+
+    # Poll for BTN_EAST release (value 0) for up to 1.2s.
+    # Match (BTN_EAST) specifically — not EV_SYN "value 0" lines.
+    release_line=""
+    i=0
+    while [ "$i" -lt 12 ] && [ -z "$release_line" ]; do
+        release_line=$(awk -v ts="$press_ts" \
+            '/(BTN_EAST), value 0/ {
+                split($0,a,"time "); split(a[2],b,",");
+                if (b[1]+0 > ts+0) { print; exit }
+            }' "$KEYCKTMP_FILE")
+        [ -z "$release_line" ] && sleep 0.1
+        i=$(( i + 1 ))
+    done
+
     if [ -z "$release_line" ]; then
+        # No BTN_EAST release within 1.2s → genuine long-press → stop
         echo "stop" > "$BTN_EVT_FILE"
     else
         release_ts=$(echo "$release_line" | sed -n 's/.*time \([0-9.]*\).*/\1/p')
         elapsed_ms=$(awk -v p="$press_ts" -v r="$release_ts" 'BEGIN{ printf "%.0f", (r-p)*1000 }')
         if [ "${elapsed_ms:-0}" -ge 800 ]; then
-            echo "stop"  > "$BTN_EVT_FILE"
+            echo "stop" > "$BTN_EVT_FILE"
         else
             local cur
             cur=$(cat "$BTN_EVT_FILE" 2>/dev/null)
@@ -399,14 +471,127 @@ is_btn_paused()  { [ "$(cat "$BTN_EVT_FILE" 2>/dev/null)" = "pause" ]; }
 is_btn_stopped() { [ "$(cat "$BTN_EVT_FILE" 2>/dev/null)" = "stop"  ]; }
 clear_btn_evt()  { : > "$BTN_EVT_FILE"; }
 
+# ── D-pad watcher (LEFT/RIGHT band switch, UP+DOWN combo screenshot) ──────
+# Hardware-verified keycodes (decoded from /proc/bus/input/devices' KEY
+# capability bitmap AND confirmed live via evtest on real button presses):
+#   KEY_UP=103  KEY_LEFT=105  KEY_RIGHT=106  KEY_DOWN=108  (BTN_EAST=305 is OK)
+# Reads the same $KEYCKTMP_FILE that check_cancel() reads. Only consumes the
+# KEY_UP/DOWN/LEFT/RIGHT lines it matched (via grep -v) so a BTN_EAST press
+# arriving in the same poll window is left intact for check_cancel() to see.
+# Call check_dpad() *before* check_cancel() each loop tick.
+check_dpad() {
+    [ -s "$KEYCKTMP_FILE" ] || return 0
+
+    local up_line down_line left_line right_line
+    up_line=$(grep "(KEY_UP), value 1" "$KEYCKTMP_FILE" | tail -1)
+    down_line=$(grep "(KEY_DOWN), value 1" "$KEYCKTMP_FILE" | tail -1)
+    left_line=$(grep "(KEY_LEFT), value 1" "$KEYCKTMP_FILE" | tail -1)
+    right_line=$(grep "(KEY_RIGHT), value 1" "$KEYCKTMP_FILE" | tail -1)
+
+    if [ -n "$up_line" ] && [ -n "$down_line" ]; then
+        local up_ts down_ts delta_ms
+        up_ts=$(echo "$up_line" | sed -n 's/.*time \([0-9.]*\).*/\1/p')
+        down_ts=$(echo "$down_line" | sed -n 's/.*time \([0-9.]*\).*/\1/p')
+        if [ -n "$up_ts" ] && [ -n "$down_ts" ]; then
+            delta_ms=$(awk -v a="$up_ts" -v b="$down_ts" \
+                'BEGIN{ d=a-b; if (d<0) d=-d; printf "%.0f", d*1000 }')
+            # UP and DOWN within 400ms of each other = combo press
+            if [ "${delta_ms:-9999}" -le 400 ]; then
+                echo "1" > "$SCREENSHOT_EVT_FILE"
+            fi
+        fi
+    elif [ -n "$left_line" ]; then
+        echo "left" > "$DPAD_EVT_FILE"
+    elif [ -n "$right_line" ]; then
+        echo "right" > "$DPAD_EVT_FILE"
+    fi
+
+    # Consume only the lines we just looked at; leave everything else
+    # (notably any pending BTN_EAST press/release) for check_cancel().
+    #
+    # IMPORTANT: do NOT `mv` a temp file over $KEYCKTMP_FILE here. start_evtest
+    # backgrounds `evtest ... | grep "^Event:" &> "$KEYCKTMP_FILE"`, which opens
+    # that path ONCE and holds the fd open on that inode for the life of the
+    # scan. `mv` replaces the path with a *new* inode -- the live evtest writer
+    # keeps appending to the old, now-pathless inode forever, while every future
+    # read of $KEYCKTMP_FILE (by check_dpad OR check_cancel) sees a file that
+    # never updates again. This was confirmed as the cause of LEFT/RIGHT band
+    # switching going silently dead after the very first dpad check. Truncate
+    # in place (redirect `>` to the existing path) reuses the same inode, so
+    # the background writer's fd stays valid.
+    grep -v -E "\(KEY_(UP|DOWN|LEFT|RIGHT)\)" "$KEYCKTMP_FILE" > "${KEYCKTMP_FILE}.tmp" 2>/dev/null
+    cat "${KEYCKTMP_FILE}.tmp" > "$KEYCKTMP_FILE" 2>/dev/null
+    rm -f "${KEYCKTMP_FILE}.tmp"
+}
+
+is_dpad_left()           { [ "$(cat "$DPAD_EVT_FILE" 2>/dev/null)" = "left"  ]; }
+is_dpad_right()          { [ "$(cat "$DPAD_EVT_FILE" 2>/dev/null)" = "right" ]; }
+clear_dpad_evt()         { : > "$DPAD_EVT_FILE"; }
+is_screenshot_requested() { [ "$(cat "$SCREENSHOT_EVT_FILE" 2>/dev/null)" = "1" ]; }
+clear_screenshot_evt()    { : > "$SCREENSHOT_EVT_FILE"; }
+
+# ── Firmware UI process safety net ────────────────────────────────────────
+# spectools_waterfall_fb.py SIGSTOPs /pineapple/pineapple for the duration of
+# a graphical waterfall so it can own /dev/fb0 without the firmware's own
+# redraw loop racing it, then SIGCONTs on exit. That SIGCONT relies on the
+# renderer shutting down cleanly (normal exit, or SIGINT/SIGTERM caught by
+# its own handler). If the renderer is killed -9, OOM-killed, or hits an
+# uncaught exception that bypasses its handler, /pineapple/pineapple is left
+# permanently stopped and the whole UI (display + input + debug terminal)
+# freezes — confirmed live during development. pineapple_ensure_running is
+# an independent, idempotent check: find the PID, look at its /proc state,
+# and CONT it if (and only if) it's actually stopped. Safe to call any time,
+# from any code path, as a belt-and-suspenders recovery net.
+pineapple_ensure_running() {
+    local pid state
+    pid="$(pidof pineapple 2>/dev/null | awk '{print $1}')"
+    if [ -z "$pid" ]; then
+        pid="$(pgrep -f /pineapple/pineapple 2>/dev/null | head -1)"
+    fi
+    [ -z "$pid" ] && return 0
+    state="$(awk '{print $3}' "/proc/${pid}/stat" 2>/dev/null)"
+    if [ "$state" = "T" ] || [ "$state" = "t" ]; then
+        kill -CONT "$pid" 2>/dev/null || true
+        echo "[safety] pineapple (pid ${pid}) was stopped -- sent CONT" >> "$LOG_FILE" 2>/dev/null
+    fi
+}
+
+# ── Band → device range mapping ────────────────────────────────────────────
+# Wi-Spy DBx is a single-radio swept analyzer: it exposes 6 fixed profiles via
+# spectool_raw's "-r/--range" flag (see spectool sourcecode/wispy_hw_dbx.c,
+# wispydbx_add_supportedranges()):
+#   0  Full 2.4GHz Band            2400-2495 MHz @ 333kHz
+#   1  Full 2.4GHz Band (Turbo)    2400-2495 MHz @ 1MHz  (faster, coarser)
+#   2  Full 5GHz Band              5150-5836 MHz @ ~1.5MHz
+#   3  UNII Low  (ch. 36-64)       5150-5350 MHz
+#   4  UNII Mid  (ch. 100-140)     5470-5725 MHz
+#   5  UNII High (ch. 149-165)     5725-5836 MHz
+# It cannot sweep both bands at once, so "auto" defaults to 2.4GHz (profile 0)
+# — same as the device's own out-of-the-box default range.
+band_to_range_index() {
+    case "$1" in
+        5)   echo 2 ;;   # Full 5GHz Band
+        2.4|auto|*) echo 0 ;;   # Full 2.4GHz Band
+    esac
+}
+
 # ── Bridge lifecycle ──────────────────────────────────────────────────────
 start_bridge() {
     local session_dir="$1"
+    local band="${2:-${current_band:-${default_band:-auto}}}"
+    local range_idx
+    range_idx=$(band_to_range_index "$band")
     rm -f "$EVENTS_FILE"
     BRIDGE_FAIL_REASON=""
+    # Always reap any leftover bridge/spectool_raw from a prior session before
+    # claiming the USB device again -- see kill_stray_specpine_workers()'s
+    # comment for why this is required (orphaned spectool_raw silently holds
+    # an exclusive libusb claim and makes every later attempt look like a
+    # dead/disconnected Wi-Spy).
+    kill_stray_specpine_workers
     export LD_LIBRARY_PATH="${SPECTOOL_LIB}:${LD_LIBRARY_PATH:-}"
     python3 "$BRIDGE_BIN" \
-        --input-command "$SPECTOOL_BIN" \
+        --input-command "${SPECTOOL_BIN} --range ${range_idx}" \
         --events-file "$EVENTS_FILE" \
         --export-dir "$session_dir" \
         --stall-timeout "$stall_timeout" \
@@ -414,7 +599,24 @@ start_bridge() {
         >> "$LOG_FILE" 2>&1 &
     BRIDGE_PID=$!
     local waited=0
-    while [ ! -s "$EVENTS_FILE" ] && [ "$waited" -lt 6 ]; do
+    # IMPORTANT: do NOT treat "$EVENTS_FILE is non-empty" as success. The
+    # bridge's own emit() writes every event -- including its very first
+    # "status: Bridge initializing" line -- into EVENTS_FILE within
+    # milliseconds of starting, regardless of whether spectool_raw has
+    # actually finished retuning the Wi-Spy and produced real device data.
+    # That made this check pass instantly even for a band that never came up
+    # (e.g. 5GHz ranges, which take noticeably longer to lock than 2.4GHz, or
+    # fail outright on some hardware): the scan would report "success" and
+    # start rendering against a feed that only ever contains status/error
+    # lines -- explains the reported "5GHz: bottom labels stay 2.4GHz-shaped,
+    # no waterfall data at all" symptom, since the renderer's freq_start/end
+    # (and therefore its channel-tick selection) only update on a real
+    # device_config/sweep event that never arrives. Wait specifically for one
+    # of those two event types, and use a longer window than the original 6s
+    # since 5GHz retune is slower in practice.
+    local need_secs=12
+    while [ "$waited" -lt "$need_secs" ] && \
+          ! grep -q '"type":"device_config"\|"type":"sweep"' "$EVENTS_FILE" 2>/dev/null; do
         sleep 1; waited=$((waited+1))
         if ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
             BRIDGE_FAIL_REASON=$(tail -1 "$LOG_FILE" 2>/dev/null | head -c 160)
@@ -427,12 +629,27 @@ start_bridge() {
             return 1
         fi
     done
+    if ! grep -q '"type":"device_config"\|"type":"sweep"' "$EVENTS_FILE" 2>/dev/null; then
+        BRIDGE_FAIL_REASON="no device_config/sweep data after ${need_secs}s for band '${band}' (range ${range_idx}) -- Wi-Spy busy retuning, this range unsupported, or USB unresponsive"
+        LOG red "Bridge alive but no real data - check Wi-Spy USB"
+        LOG yellow "${BRIDGE_FAIL_REASON}"
+        led_safe R 255 G 0 B 0
+        ringtone_play "SideBeam"
+        stop_bridge
+        return 1
+    fi
     return 0
 }
 
 stop_bridge() {
     [ -n "$BRIDGE_PID" ] && kill "$BRIDGE_PID" 2>/dev/null || true
     pkill -f "spectools_bridge.py" 2>/dev/null || true
+    # Also reap the bridge's spectool_raw/spectool_net child directly --
+    # bridge.py's SIGTERM handler doesn't kill its own subprocess, so without
+    # this an orphaned spectool_raw keeps the Wi-Spy's libusb claim open and
+    # every subsequent start_bridge() fails as if the device were gone.
+    pkill -f "spectool_raw" 2>/dev/null || true
+    pkill -f "spectool_net" 2>/dev/null || true
     BRIDGE_PID=""
 }
 
