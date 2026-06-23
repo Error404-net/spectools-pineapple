@@ -36,8 +36,8 @@ if [ -f "${SRC_PAY}/README.md" ]; then
     cp "${SRC_PAY}/README.md" "${STAGE_DIR}/specpine/README.md"
 fi
 
-# Python helpers (bridge + renderers + splash)
-for py in spectools_bridge.py spectools_waterfall_pager.py spectools_waterfall_fb.py spectools_waterfall_http.py specpine_splash.py; do
+# Python helpers (bridge + renderers + splash + theme installer)
+for py in spectools_bridge.py spectools_waterfall_pager.py spectools_waterfall_fb.py spectools_waterfall_http.py specpine_splash.py specpine_theme_install.py; do
     SRC="${SRC_PAY}/bin/${py}"
     if [ ! -f "$SRC" ]; then
         echo "ERROR: Missing python helper: $SRC"
