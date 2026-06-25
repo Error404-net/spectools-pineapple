@@ -582,7 +582,13 @@ def main(argv: list[str] | None = None) -> int:
 
     while running[0]:
         reload_flag[0] = False
-        _run_session(events_path, args, lut, fb, flush_fb, running, reload_flag)
+        try:
+            _run_session(events_path, args, lut, fb, flush_fb, running, reload_flag)
+        except Exception as exc:
+            import traceback
+            print(f"[fb] _run_session crash: {exc!r}", file=sys.stderr, flush=True)
+            traceback.print_exc(file=sys.stderr)
+            raise
 
     if not args.no_ui_stop:
         pineapple_cont()

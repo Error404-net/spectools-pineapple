@@ -131,7 +131,10 @@ graphical_waterfall() {
     show_ansi graphical_waterfall
     LOG blue "── Graphical Waterfall ──"
     LOG       "Display takes over. Hold OK ≥0.8s to stop."
-    if ! start_bridge "$SESSION_DIR" "$current_band"; then
+    local _sb_ret
+    start_bridge "$SESSION_DIR" "$current_band"; _sb_ret=$?
+    echo "[wf] initial start_bridge ret=${_sb_ret} band=${current_band}" >> "$LOG_FILE"
+    if [ "$_sb_ret" -ne 0 ]; then
         mark_session_failed "$SESSION_DIR" "graphical"
         LOG yellow "Session log: $SESSION_DIR"
         show_menu_end_OK=2
@@ -150,6 +153,49 @@ graphical_waterfall() {
         >> "$LOG_FILE" 2>&1 &
     RENDERER_PID=$!
 
+    # Independent nuclear-kill watchdog: runs its OWN evtest so Back-hold
+    # always kills the waterfall even when the main shell loop is blocked.
+    # Mechanism: hold any non-d-pad, non-OK button for 2 seconds → kill -9
+    # everything. Quick taps are ignored (they're handled by the main loop).
+    local KILLWATCH_PID _wkevts="/tmp/specpine_wkevts.tmp"
+    local _wkdev="/dev/input/event0"
+    [ -e "$_wkdev" ] || _wkdev=$(ls /dev/input/event* 2>/dev/null | head -1)
+    : > "$_wkevts"
+    (
+        evtest "$_wkdev" 2>/dev/null | awk '
+            /type 1.*value 1/ && !/KEY_UP|KEY_DOWN|KEY_LEFT|KEY_RIGHT|\(BTN_EAST\)/ { print "PRESS";   fflush() }
+            /type 1.*value 0/ && !/KEY_UP|KEY_DOWN|KEY_LEFT|KEY_RIGHT|\(BTN_EAST\)/ { print "RELEASE"; fflush() }
+        ' >> "$_wkevts" &
+        _ep=$!
+        _rp="$RENDERER_PID"
+        _press_t=0
+        while kill -0 "$_rp" 2>/dev/null; do
+            if [ -s "$_wkevts" ]; then
+                _evts=$(cat "$_wkevts"); : > "$_wkevts"
+                case "$_evts" in
+                    *PRESS*RELEASE*|*RELEASE*) _press_t=0 ;;  # quick tap / release → reset
+                    *PRESS*)
+                        [ "$_press_t" -eq 0 ] && _press_t=$(date +%s)
+                        ;;
+                esac
+            fi
+            if [ "$_press_t" -gt 0 ] && [ $(( $(date +%s) - _press_t )) -ge 2 ]; then
+                echo "[watchdog] Back held 2s -- nuking specpine" >> "$LOG_FILE"
+                kill -9 "$_rp" 2>/dev/null || true
+                pkill -9 -f spectools_waterfall 2>/dev/null || true
+                pkill -9 -f spectools_bridge    2>/dev/null || true
+                pkill -9 -f spectool_raw        2>/dev/null || true
+                _pp=$(pidof pineapple 2>/dev/null | awk '{print $1}')
+                [ -n "$_pp" ] && kill -CONT "$_pp" 2>/dev/null || true
+                break
+            fi
+            sleep 0.3
+        done
+        kill "$_ep" 2>/dev/null || true
+        rm -f "$_wkevts"
+    ) &
+    KILLWATCH_PID=$!
+
     clear_dpad_evt
     clear_screenshot_evt
     local shot_n=0
@@ -164,11 +210,24 @@ graphical_waterfall() {
     stall_limit=$(( stall_timeout * 3 ))
     [ "$stall_limit" -lt 15 ] && stall_limit=15
 
+    local _tick=0
     while kill -0 "$RENDERER_PID" 2>/dev/null; do
+        _tick=$((_tick + 1))
+        if [ $((_tick % 20)) -eq 1 ]; then
+            local _ks _es
+            _ks=$(wc -c < "$KEYCKTMP_FILE" 2>/dev/null || echo -1)
+            _es="dead"; kill -0 "${EVTEST_PID:-}" 2>/dev/null && _es="alive"
+            echo "[wf t${_tick}] evtest=${_es} keyck=${_ks}B btn=$(cat "$BTN_EVT_FILE" 2>/dev/null) dpad=$(cat "$DPAD_EVT_FILE" 2>/dev/null)" >> "$LOG_FILE"
+            [ "${_ks:-0}" -gt 0 ] && tail -2 "$KEYCKTMP_FILE" 2>/dev/null >> "$LOG_FILE"
+        fi
         check_dpad
         check_cancel
         if is_btn_stopped; then
-            kill "$RENDERER_PID" 2>/dev/null || true
+            echo "[wf] stop -- force-killing renderer" >> "$LOG_FILE"
+            kill    "$RENDERER_PID" 2>/dev/null || true
+            kill -9 "$RENDERER_PID" 2>/dev/null || true
+            kill_stray_specpine_workers
+            pineapple_ensure_running
             break
         fi
 
@@ -180,7 +239,14 @@ graphical_waterfall() {
         elif [ $(( $(date +%s) - last_evt_growth )) -ge "$stall_limit" ]; then
             LOG red "Feed stalled (${stall_limit}s no data) -- recovering"
             stop_bridge
-            if start_bridge "$SESSION_DIR" "$current_band"; then
+            local _sb_stall_ret
+            start_bridge "$SESSION_DIR" "$current_band" "$RENDERER_PID"; _sb_stall_ret=$?
+            if [ "$_sb_stall_ret" -eq 2 ]; then
+                echo "[wf] stall recovery cancelled by user" >> "$LOG_FILE"
+                echo "stop" > "$BTN_EVT_FILE"
+                kill "$RENDERER_PID" 2>/dev/null || true
+                break
+            elif [ "$_sb_stall_ret" -eq 0 ]; then
                 kill -USR1 "$RENDERER_PID" 2>/dev/null || true
                 LOG yellow "Feed restarted: ${current_band} GHz"
                 last_evt_size=-1
@@ -204,7 +270,14 @@ graphical_waterfall() {
             LOG yellow "Switching band: ${current_band} → ${new_band}"
             stop_bridge
             current_band="$new_band"
-            if start_bridge "$SESSION_DIR" "$current_band"; then
+            local _sb_band_ret
+            start_bridge "$SESSION_DIR" "$current_band" "$RENDERER_PID"; _sb_band_ret=$?
+            if [ "$_sb_band_ret" -eq 2 ]; then
+                echo "[wf] band switch cancelled by user" >> "$LOG_FILE"
+                echo "stop" > "$BTN_EVT_FILE"
+                kill "$RENDERER_PID" 2>/dev/null || true
+                break
+            elif [ "$_sb_band_ret" -eq 0 ]; then
                 kill -USR1 "$RENDERER_PID" 2>/dev/null || true
                 LOG green "Now scanning: ${current_band} GHz"
             else
@@ -217,7 +290,14 @@ graphical_waterfall() {
                 # OLD band so the feed recovers instead of dying silently.
                 LOG red "Band switch failed: ${BRIDGE_FAIL_REASON:-unknown}"
                 current_band="$old_band"
-                if start_bridge "$SESSION_DIR" "$current_band"; then
+                local _sb_revert_ret
+                start_bridge "$SESSION_DIR" "$current_band" "$RENDERER_PID"; _sb_revert_ret=$?
+                if [ "$_sb_revert_ret" -eq 2 ]; then
+                    echo "[wf] band revert cancelled by user" >> "$LOG_FILE"
+                    echo "stop" > "$BTN_EVT_FILE"
+                    kill "$RENDERER_PID" 2>/dev/null || true
+                    break
+                elif [ "$_sb_revert_ret" -eq 0 ]; then
                     kill -USR1 "$RENDERER_PID" 2>/dev/null || true
                     LOG yellow "Reverted to: ${current_band} GHz"
                 else
@@ -247,6 +327,9 @@ graphical_waterfall() {
     pineapple_ensure_running   # belt-and-suspenders: renderer's own SIGCONT may not have fired
 
     stop_bridge
+    kill "$KILLWATCH_PID" 2>/dev/null || true
+    wait "$KILLWATCH_PID" 2>/dev/null || true
+    rm -f /tmp/specpine_wkevts.tmp
     killall evtest 2>/dev/null || true
     EVTEST_PID=""
     clear_btn_evt

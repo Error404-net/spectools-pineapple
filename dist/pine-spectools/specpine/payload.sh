@@ -171,6 +171,7 @@ echo $$ > "$PID_FILE"
 # stray workers and force-resume the firmware UI before doing anything else.
 kill_stray_specpine_workers
 pineapple_ensure_running
+rm -f /tmp/specpine_hud.lock
 
 mkdir -p "$LOOT_ROOT" "$TMP_LOOT_ROOT" 2>/dev/null || true
 

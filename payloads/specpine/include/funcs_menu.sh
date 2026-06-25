@@ -99,6 +99,10 @@ main_menu() {
         main_menu_hud
         [ "$selnum" != "__HUD_FAIL__" ] && return 0
         LOG yellow "HUD unavailable — falling back to standard menu"
+        if [ -s /tmp/specpine_hud_debug.log ]; then
+            echo "[hud debug log follows]" >> "$LOG_FILE"
+            tail -30 /tmp/specpine_hud_debug.log >> "$LOG_FILE" 2>/dev/null || true
+        fi
         pineapple_ensure_running
     fi
     main_menu_legacy

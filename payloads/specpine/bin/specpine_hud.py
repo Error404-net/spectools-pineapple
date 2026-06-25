@@ -37,6 +37,7 @@ import os
 import re
 import select
 import signal
+import shutil
 import subprocess
 import sys
 import time
@@ -175,10 +176,21 @@ def open_evtest() -> "subprocess.Popen | None":
             _dbg("open_evtest: no /dev/input/event* candidates found")
             return None
         path = os.path.join(EVT_CANDIDATES_DIR, cands[0])
-    _dbg(f"open_evtest: using {path}")
+    evtest_bin = shutil.which("evtest")
+    if evtest_bin is None:
+        for _candidate in ("/sbin/evtest", "/usr/sbin/evtest", "/usr/bin/evtest", "/bin/evtest"):
+            if os.path.isfile(_candidate):
+                evtest_bin = _candidate
+                break
+    if evtest_bin is None:
+        _dbg(f"open_evtest: evtest not found; PATH={os.environ.get('PATH', '')}")
+        print("[hud] evtest not found in PATH or known locations", file=sys.stderr)
+        return None
+
+    _dbg(f"open_evtest: using {path!r}, evtest_bin={evtest_bin!r}")
     try:
         proc = subprocess.Popen(
-            ["evtest", path],
+            [evtest_bin, path],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, bufsize=1,
         )

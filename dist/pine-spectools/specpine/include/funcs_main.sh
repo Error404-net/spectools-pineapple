@@ -34,12 +34,14 @@ fi
 # instantly). Reaping by name here, not just by tracked PID, is what catches
 # that case.
 kill_stray_specpine_workers() {
-    local _pid
-    for _pid in $(ps w 2>/dev/null | awk '/spectools_bridge|spectools_waterfall|spectool_raw|spectool_net/{print $1}'); do
+    local _spare="${1:-}" _pid
+    for _pid in $(ps w 2>/dev/null | awk '/spectools_bridge|spectools_waterfall|spectool_raw|spectool_net|specpine_hud/{print $1}'); do
+        [ -n "$_spare" ] && [ "$_pid" = "$_spare" ] && continue
         kill "$_pid" 2>/dev/null || true
     done
     sleep 0.3
-    for _pid in $(ps w 2>/dev/null | awk '/spectools_bridge|spectools_waterfall|spectool_raw|spectool_net/{print $1}'); do
+    for _pid in $(ps w 2>/dev/null | awk '/spectools_bridge|spectools_waterfall|spectool_raw|spectool_net|specpine_hud/{print $1}'); do
+        [ -n "$_spare" ] && [ "$_pid" = "$_spare" ] && continue
         kill -9 "$_pid" 2>/dev/null || true
     done
 }
@@ -375,17 +377,21 @@ start_evtest() {
     : > "$DPAD_EVT_FILE"
     : > "$DPAD_PENDING_FILE"
     : > "$SCREENSHOT_EVT_FILE"
-    if [ ! -e /dev/input/event0 ]; then
-        # Best-effort fallback
+    # grep is block-buffered when writing to a file, so events accumulate in its
+    # buffer and never appear in KEYCKTMP_FILE until grep exits (i.e. when evtest
+    # is killed at scan end). awk with fflush() flushes each matched line
+    # immediately, so check_cancel/check_dpad can see events within 150ms ticks.
+    local _evtdev="/dev/input/event0"
+    if [ ! -e "$_evtdev" ]; then
         local cand
         cand=$(ls /dev/input/event* 2>/dev/null | head -1)
         [ -z "$cand" ] && return 1
-        ((evtest "$cand" | grep "^Event:" &> "$KEYCKTMP_FILE") &) > /dev/null 2>&1
-    else
-        ((evtest /dev/input/event0 | grep "^Event:" &> "$KEYCKTMP_FILE") &) > /dev/null 2>&1
+        _evtdev="$cand"
     fi
+    ((evtest "$_evtdev" | awk '/^Event:/ { print; fflush() }' > "$KEYCKTMP_FILE" 2>/dev/null) &) > /dev/null 2>&1
     # pgrep not on BusyBox; pidof works and returns newest PID last
     EVTEST_PID="$(pidof evtest 2>/dev/null | awk '{print $NF}')"
+    echo "[input] start_evtest: dev=${_evtdev} pid=${EVTEST_PID:-NONE}" >> "$LOG_FILE"
 }
 
 check_cancel() {
@@ -412,18 +418,26 @@ check_cancel() {
     #
     # Truncate in place (not mv -- see check_dpad's comment on why) so the
     # live evtest writer's fd stays valid.
-    local cancel_out south_hit
+    local cancel_out south_hit any_back
     cancel_out=$(awk -v tmpf="${KEYCKTMP_FILE}.tmp" '
         function getts(l,    a,b) {
             split(l, a, "time "); split(a[2], b, ",")
             return b[1]
         }
-        /\(BTN_SOUTH\), value 1/ { south = 1 }
-        /\(BTN_EAST\), value 1/  { press_line = $0 }
-        /\(BTN_SOUTH\)|\(BTN_EAST\)/ { print > tmpf }
+        /\(BTN_SOUTH\), value 1/                                 { south = 1 }
+        /\(BTN_EAST\), value 1/                                  { press_line = $0 }
+        /\(BTN_SOUTH\)|\(BTN_EAST\)/                             { print > tmpf }
+        # Broadened Back detection: any EV_KEY value 1 that is not BTN_EAST
+        # and not a d-pad key (check_dpad already stripped KEY_UP/DOWN/LEFT/RIGHT
+        # value 1 lines before we run). Catches BTN_SOUTH under any alias,
+        # KEY_BACK (code 158), or whatever code this device emits for its Back
+        # button -- since we have never confirmed a [cancel] log line in a live
+        # graphical-waterfall session, the actual code may differ from BTN_SOUTH.
+        /type 1/ && /value 1/ && !/\(BTN_EAST\)/ && !south      { any_btn = 1 }
         END {
-            if (south)      print "SOUTH"
-            if (press_line) print "PRESS " getts(press_line)
+            if (south)               print "SOUTH"
+            if (press_line)          print "PRESS " getts(press_line)
+            if (!south && any_btn)   print "ANYBACK"
         }
     ' "$KEYCKTMP_FILE")
     cat "${KEYCKTMP_FILE}.tmp" > "$KEYCKTMP_FILE" 2>/dev/null
@@ -431,25 +445,24 @@ check_cancel() {
 
     south_hit=""
     press_ts=""
+    any_back=""
     while IFS=' ' read -r _kind _val; do
         case "$_kind" in
-            SOUTH) south_hit=1 ;;
-            PRESS) press_ts="$_val" ;;
+            SOUTH)   south_hit=1 ;;
+            PRESS)   press_ts="$_val" ;;
+            ANYBACK) any_back=1 ;;
         esac
     done <<EOF
 $cancel_out
 EOF
+    if [ -n "$south_hit" ] || [ -n "$press_ts" ] || [ -n "$any_back" ]; then
+        echo "[cancel] south=${south_hit:--} east_ts=${press_ts:--} anyback=${any_back:--}" >> "$LOG_FILE"
+    fi
 
-    # Back / red button. Hardware-verified via evtest: code 304 (BTN_SOUTH)
-    # -- distinct from BTN_EAST (305, OK). The Pager firmware itself reacts to
-    # Back at native LIST_PICKER/dialog prompts ("Press Back to bail out"),
-    # but during a framebuffer takeover (graphical_waterfall etc.) the
-    # firmware's own UI process is SIGSTOPped, so it can only queue the event
-    # and flash its exit dialog once resumed -- it can't actually act on it.
-    # Watch BTN_SOUTH here too so Back works as an immediate stop while our
-    # own evtest loop owns input, same as a long OK-press. No tap/hold
-    # disambiguation needed: Back is a dedicated button, any press stops.
-    if [ -n "$south_hit" ]; then
+    # Back / red button — any press stops. BTN_SOUTH is the expected code
+    # (code 304) but ANYBACK catches any other EV_KEY value 1 that isn't the
+    # OK/d-pad buttons, in case the device names its Back button differently.
+    if [ -n "$south_hit" ] || [ -n "$any_back" ]; then
         echo "stop" > "$BTN_EVT_FILE"
         : > "$KEYCKTMP_FILE"
         return 0
@@ -549,6 +562,9 @@ check_dpad() {
     done <<EOF
 $dpad_out
 EOF
+    if [ -n "$up_ts" ] || [ -n "$down_ts" ] || [ -n "$left_hit" ] || [ -n "$right_hit" ]; then
+        echo "[dpad] up=${up_ts:--} dn=${down_ts:--} L=${left_hit:--} R=${right_hit:--}" >> "$LOG_FILE"
+    fi
 
     # This loop polls every ~150ms, but the combo window is 400ms -- two
     # *separate* physical button presses (UP and DOWN) very rarely land in
@@ -683,6 +699,7 @@ band_to_range_index() {
 start_bridge() {
     local session_dir="$1"
     local band="${2:-${current_band:-${default_band:-auto}}}"
+    local spare_pid="${3:-}"   # PID to spare from kill_stray (e.g. active renderer during band switch)
     local range_idx
     range_idx=$(band_to_range_index "$band")
     rm -f "$EVENTS_FILE"
@@ -692,7 +709,7 @@ start_bridge() {
     # comment for why this is required (orphaned spectool_raw silently holds
     # an exclusive libusb claim and makes every later attempt look like a
     # dead/disconnected Wi-Spy).
-    kill_stray_specpine_workers
+    kill_stray_specpine_workers "$spare_pid"
     export LD_LIBRARY_PATH="${SPECTOOL_LIB}:${LD_LIBRARY_PATH:-}"
     python3 "$BRIDGE_BIN" \
         --input-command "${SPECTOOL_BIN} --range ${range_idx}" \
@@ -727,10 +744,19 @@ start_bridge() {
             [ -z "$BRIDGE_FAIL_REASON" ] && BRIDGE_FAIL_REASON="bridge exited before emitting any data (Wi-Spy unplugged?)"
             LOG red "Bridge exited - check Wi-Spy USB"
             LOG yellow "${BRIDGE_FAIL_REASON}"
+            echo "[bridge] exited early: ${BRIDGE_FAIL_REASON}" >> "$LOG_FILE"
             led_safe R 255 G 0 B 0
             ringtone_play "SideBeam"
             BRIDGE_PID=""
             return 1
+        fi
+        # Allow Back (BTN_SOUTH) to abort a stuck wait (e.g. slow 5GHz retune).
+        # Return 2 so callers can distinguish user-cancel from a real failure.
+        if grep -q "(BTN_SOUTH), value 1" "$KEYCKTMP_FILE" 2>/dev/null; then
+            BRIDGE_FAIL_REASON="cancelled by user (Back pressed during startup)"
+            echo "[bridge] cancelled by BTN_SOUTH after ${waited}s" >> "$LOG_FILE"
+            stop_bridge
+            return 2
         fi
     done
     if ! grep -q '"type":"device_config"\|"type":"sweep"' "$EVENTS_FILE" 2>/dev/null; then
