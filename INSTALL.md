@@ -6,7 +6,7 @@ RF spectrum analysis app for the Hak5 WiFi Pineapple Pager, driving a Wi-Spy DBx
 
 ## What's in the ZIP
 
-```
+```text
 pine-spectools.zip
 ├── pine-spectools/
 │   ├── specpine/               ← the main payload
@@ -57,6 +57,7 @@ ssh root@172.16.42.1 'cd /tmp && \
 On the Pager: **Payloads → utils → SpecPine Installer**
 
 The installer will:
+
 1. Detect and install missing dependencies (`python3`, `evtest`) via opkg — prompts once, needs internet
 2. Extract and install SpecPine to `payloads/user/reconnaissance/specpine`
 3. Set all permissions
@@ -77,40 +78,40 @@ Plug in the Wi-Spy DBx, then launch **SpecPine** from the Pager.
 
 The boot splash plays, then the main menu appears:
 
-| Menu item | What it does |
-|---|---|
-| **WATERFALL/ASCII** | Live ASCII waterfall on the Pager display. Tap OK = pause, hold OK ≥0.8s = stop. |
-| **WATERFALL/GRAPH** | Full-colour 480×222 RGB565 waterfall on `/dev/fb0`. Hold OK ≥0.8s to stop. |
-| **SYS/CONFIG** | Settings, diagnostics, about, reset to defaults. |
+| Menu item       | What it does                                                                      |
+| --------------- | --------------------------------------------------------------------------------- |
+| WATERFALL/ASCII | Live ASCII waterfall on the Pager display. Tap OK = pause, hold OK ≥0.8s = stop. |
+| WATERFALL/GRAPH | Full-color 480×222 RGB565 waterfall on `/dev/fb0`. Hold OK ≥0.8s to stop.        |
+| SYS/CONFIG      | Settings, diagnostics, about, reset to defaults.                                  |
 
 Scans launch immediately with no pre-run prompts. Band is set from **Settings → Default Band** (2.4 GHz or 5 GHz). Sessions are saved automatically to `/root/loot/specpine/` unless No-loot mode is on.
 
 ### Controls
 
-| Input | Action |
-|---|---|
-| Tap OK | Pause / resume (ASCII waterfall) |
-| Hold OK ≥0.8s | Stop scan, return to menu |
-| Hold Back ≥2s | Exit SpecPine |
-| Hold DOWN ≥2s | Save framebuffer screenshot (graphical waterfall only) |
+| Input          | Action                                                  |
+| -------------- | ------------------------------------------------------- |
+| Tap OK         | Pause / resume (ASCII waterfall)                        |
+| Hold OK ≥0.8s  | Stop scan, return to menu                               |
+| Hold Back ≥2s  | Exit SpecPine                                           |
+| Hold DOWN ≥2s  | Save framebuffer screenshot (graphical waterfall only)  |
 
 ### Settings
 
 Accessible from **SYS/CONFIG**:
 
-| Setting | Default | Description |
-|---|---|---|
-| Default Band | 2.4 GHz | Band used for all scans |
-| Stall Timeout | 8s | Seconds of no data before feed recovery attempt |
-| Max Restarts | 5 | Max bridge restart attempts before giving up |
-| Mute | off | Suppress all ringtones |
-| No-loot Mode | off | Store sessions in `/tmp` and wipe on exit |
-| Skip Ringtone Check | off | Skip the ringtone installer prompt at launch |
+| Setting             | Default  | Description                                       |
+| ------------------- | -------- | ------------------------------------------------- |
+| Default Band        | 2.4 GHz  | Band used for all scans                           |
+| Stall Timeout       | 8s       | Seconds of no data before feed recovery attempt   |
+| Max Restarts        | 5        | Max bridge restart attempts before giving up      |
+| Mute                | off      | Suppress all ringtones                            |
+| No-loot Mode        | off      | Store sessions in `/tmp` and wipe on exit         |
+| Skip Ringtone Check | off      | Skip the ringtone installer prompt at launch      |
 
 ### Loot
 
-```
-/root/loot/specpine/session_YYYYMMDD_HHMMSS/
+```text
+/root/loot/specpine/session_YYYYMMDD_HHMMSS_text/
 ├── meta.json           # band, device, freq range, settings snapshot
 ├── events.jsonl        # full bridge stream
 ├── sweep_summary.csv   # per-sweep min/max/avg dBm
@@ -118,6 +119,7 @@ Accessible from **SYS/CONFIG**:
 ```
 
 Retrieve loot:
+
 ```bash
 scp -r root@172.16.42.1:/root/loot/specpine ./loot/
 ```
@@ -129,13 +131,15 @@ scp -r root@172.16.42.1:/root/loot/specpine ./loot/
 **"spectool_raw not found"** — Re-run the installer payload. The binary ships in the ZIP and should be at `bin/spectool_raw` inside the payload directory.
 
 **"Bridge exited — check Wi-Spy USB"** — Wi-Spy not detected:
+
 ```bash
 ssh root@172.16.42.1 "lsusb"   # expect 0x1781 or 0x1dd5 (MetaGeek)
-ssh root@172.16.42.1 "LD_LIBRARY_PATH=/root/payloads/user/reconnaissance/specpine/lib \
-  /root/payloads/user/reconnaissance/specpine/bin/spectool_raw --list"
+PAYLOAD=/root/payloads/user/reconnaissance/specpine
+ssh root@172.16.42.1 "LD_LIBRARY_PATH=${PAYLOAD}/lib ${PAYLOAD}/bin/spectool_raw --list"
 ```
 
-**Graphical waterfall leaves a blank screen** — `vtcon1` should rebind automatically on exit. If it doesn't:
+**Graphical waterfall leaves a blank screen** — the virtual console should rebind automatically on exit. If it doesn't:
+
 ```bash
 ssh root@172.16.42.1 "echo 1 > /sys/class/vtconsole/vtcon1/bind"
 ```

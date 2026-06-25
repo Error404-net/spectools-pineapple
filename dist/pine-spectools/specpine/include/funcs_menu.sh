@@ -598,7 +598,7 @@ the SpecPine package."
     fi
     current_band="$default_band"
     [ "$current_band" = "auto" ] && current_band="2.4"
-    current_session_name=$(date +%Y%m%d_%H%M%S)
+    current_session_name=""
     if [ "$noloot" = "true" ]; then
         current_save_loot="false"
     else
