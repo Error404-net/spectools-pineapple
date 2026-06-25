@@ -1,157 +1,155 @@
-# SpecPine — Installation & Usage Guide
+# SpecPine — Installation Guide
 
-A bundled BluePine-style RF spectrum analysis app for the Hak5 WiFi Pineapple Pager, driving a Wi-Spy DBx USB spectrum analyzer. One payload, one menu, every feature inside it: in-app installer, status / device info, quick scan, ASCII waterfall, full-colour framebuffer waterfall, Wi-Fi channel utilization, anomaly / jammer detection, saved sessions browser, persistent settings.
+RF spectrum analysis app for the Hak5 WiFi Pineapple Pager, driving a Wi-Spy DBx USB spectrum analyzer. ASCII and full-colour framebuffer waterfall modes, persistent settings, and loot capture — all in a single self-contained payload.
+
+---
+
+## What's in the ZIP
+
+```
+pine-spectools.zip
+├── pine-spectools/
+│   ├── specpine/               ← the main payload
+│   │   ├── payload.sh
+│   │   ├── bin/                (spectool_raw, spectool_net, python helpers)
+│   │   ├── lib/                (libusb — bundled, no /opt install needed)
+│   │   ├── include/
+│   │   └── data/
+│   ├── specpine_installer/     ← one-shot installer payload
+│   │   └── payload.sh
+│   └── INSTALL.md
+```
+
+The MIPS binaries and libusb ship inside the ZIP. No system-wide install required.
 
 ---
 
 ## Prerequisites
 
-- Hak5 WiFi Pineapple Pager (24.10.1, mipsel_24kc / ramips/mt76x8)
+- Hak5 WiFi Pineapple Pager (firmware 24.10.1, mipsel_24kc / ramips/mt76x8)
 - Wi-Spy DBx connected via USB
-- SSH/SCP access (`root@pineapple` or `root@172.16.42.1`)
-- Internet on the Pager for the first-run dependency install (one-time `opkg install python3 evtest`); SpecPine will prompt and install for you
+- SSH/SCP access to the Pager (`root@172.16.42.1`, default password `hak5pineapple`)
+- Internet on the Pager for first-run opkg install of `python3` and `evtest` (one-time)
 
 ---
 
-## Step 1 — Upload SpecPine
+## Install
 
-Unzip the package on your computer, then SCP the single `specpine/` directory into the Pager's `reconnaissance` category:
+### Step 1 — Copy the ZIP to the Pager
 
 ```bash
-unzip pine-spectools.zip
-scp -r pine-spectools/specpine root@pineapple:/root/payloads/user/reconnaissance/
-ssh root@pineapple "chmod 755 \
-    /root/payloads/user/reconnaissance/specpine/payload.sh \
-    /root/payloads/user/reconnaissance/specpine/bin/*.py \
-    /root/payloads/user/reconnaissance/specpine/bin/spectool_raw \
-    /root/payloads/user/reconnaissance/specpine/bin/spectool_net"
+scp pine-spectools.zip root@172.16.42.1:/root/
 ```
 
-That's the entire upload. SpecTools binaries, libraries, udev rules, the ASCII logo and all helper scripts are inside `specpine/`. The in-app installer wires them into `/opt/spectools/`.
+### Step 2 — Bootstrap the installer payload
+
+```bash
+ssh root@172.16.42.1 'cd /tmp && \
+  unzip -o /root/pine-spectools.zip "pine-spectools/specpine_installer/payload.sh" && \
+  mkdir -p /root/payloads/user/utils/specpine_installer && \
+  cp pine-spectools/specpine_installer/payload.sh \
+     /root/payloads/user/utils/specpine_installer/payload.sh && \
+  chmod 755 /root/payloads/user/utils/specpine_installer/payload.sh'
+```
+
+### Step 3 — Run the installer from the Pager UI
+
+On the Pager: **Payloads → utils → SpecPine Installer**
+
+The installer will:
+1. Detect and install missing dependencies (`python3`, `evtest`) via opkg — prompts once, needs internet
+2. Extract and install SpecPine to `payloads/user/reconnaissance/specpine`
+3. Set all permissions
+
+SpecPine will then appear under **Payloads → reconnaissance**.
 
 ---
 
-## Step 2 — Launch SpecPine
+## Updating
 
-On the Pager, navigate to **Payloads → user → reconnaissance → specpine**, run **payload.sh**.
-
-You'll see:
-
-1. The SpecPine ASCII logo + `Flutter` ringtone.
-2. *"Press OK to Start"*. Press OK.
-3. The main menu:
-
-   ```
-   ================ SpecPine - v1.0 ====
-   1: Status
-   2: Quick Scan
-   3: Text Waterfall
-   4: Graphical Waterfall
-   5: Channel Analysis
-   6: Anomaly Detection
-   7: Saved Sessions
-   8: Install / Repair
-   9: Settings
-   10: About
-   0: Exit
-   ```
-
-If `python3` or `evtest` are missing, SpecPine prompts to install them via `opkg` (one-time, network required).
+Drop a new `pine-spectools.zip` at `/root/pine-spectools.zip` via SCP, then run the installer again from the Pager UI. No SSH beyond the file copy.
 
 ---
 
-## Step 3 — Install SpecTools binaries (one-time)
+## Usage
 
-From the main menu, pick **Install / Repair → Install**. SpecPine copies:
+Plug in the Wi-Spy DBx, then launch **SpecPine** from the Pager.
 
-- `/opt/spectools/bin/spectool_raw` and `spectool_net`
-- `/opt/spectools/lib/libusb-{0.1,1.0}.so*` (with versioned symlinks)
-- `/etc/spectools/spectools.conf`
-- `/etc/udev/rules.d/99-wispy.rules`
-
-LED turns green on success. You only need to do this once per Pager.
-
----
-
-## Step 4 — Use it
-
-Plug the Wi-Spy DBx in. From the main menu:
+The boot splash plays, then the main menu appears:
 
 | Menu item | What it does |
 |---|---|
-| **Status** | `spectool_raw --list`, freq range, bin count, settings summary, scan counters |
-| **Quick Scan** | ~3-second snapshot, prints min/max/avg dBm |
-| **Text Waterfall** | ASCII waterfall on the Pager LOG. Tap OK = pause. Hold OK ≥0.8 s = stop. |
-| **Graphical Waterfall** | Full-colour 480×222 RGB565 waterfall on `/dev/fb0`. Same OK semantics. |
-| **Channel Analysis** | Captures for N seconds, prints ranked Wi-Fi channel utilization for the chosen band |
-| **Anomaly Detection** | Continuous baseline-spike watcher. Red LED + Warning ringtone on breach. |
-| **Saved Sessions** | List, view summary, replay (ASCII), delete |
-| **Settings** | Default band/mode, stall timeout, max restarts, anomaly thresholds, mute, no-loot mode, GPS tagging, reset to defaults |
+| **WATERFALL/ASCII** | Live ASCII waterfall on the Pager display. Tap OK = pause, hold OK ≥0.8s = stop. |
+| **WATERFALL/GRAPH** | Full-colour 480×222 RGB565 waterfall on `/dev/fb0`. Hold OK ≥0.8s to stop. |
+| **SYS/CONFIG** | Settings, diagnostics, about, reset to defaults. |
 
-Each scan shows a pre-run dialog: pick band (Auto / 2.4 / 5), pick session name, choose whether to save loot.
+Scans launch immediately with no pre-run prompts. Band is set from **Settings → Default Band** (2.4 GHz or 5 GHz). Sessions are saved automatically to `/root/loot/specpine/` unless No-loot mode is on.
+
+### Controls
+
+| Input | Action |
+|---|---|
+| Tap OK | Pause / resume (ASCII waterfall) |
+| Hold OK ≥0.8s | Stop scan, return to menu |
+| Hold Back ≥2s | Exit SpecPine |
+| Hold DOWN ≥2s | Save framebuffer screenshot (graphical waterfall only) |
+
+### Settings
+
+Accessible from **SYS/CONFIG**:
+
+| Setting | Default | Description |
+|---|---|---|
+| Default Band | 2.4 GHz | Band used for all scans |
+| Stall Timeout | 8s | Seconds of no data before feed recovery attempt |
+| Max Restarts | 5 | Max bridge restart attempts before giving up |
+| Mute | off | Suppress all ringtones |
+| No-loot Mode | off | Store sessions in `/tmp` and wipe on exit |
+| Skip Ringtone Check | off | Skip the ringtone installer prompt at launch |
 
 ### Loot
 
 ```
-/root/loot/specpine/session_YYYYMMDD_HHMMSS_<name>/
-├── meta.json           # band, device, freq range, GPS, settings snapshot
+/root/loot/specpine/session_YYYYMMDD_HHMMSS/
+├── meta.json           # band, device, freq range, settings snapshot
 ├── events.jsonl        # full bridge stream
-├── sweep_summary.csv   # per-sweep min/max/avg
-├── channel_report.txt  # channel_analysis output
-├── anomaly_log.txt     # anomaly_detection hits + GPS
-└── gps.txt             # initial GPS_GET (if enabled)
+├── sweep_summary.csv   # per-sweep min/max/avg dBm
+└── screenshot_*.bmp    # framebuffer screenshots (if taken)
 ```
-
-In **No-loot mode** (Settings → No-loot Mode), sessions live under `/tmp/specpine/` and are wiped when SpecPine exits.
 
 Retrieve loot:
 ```bash
-scp -r root@pineapple:/root/loot/specpine ./loot/
+scp -r root@172.16.42.1:/root/loot/specpine ./loot/
 ```
-
----
-
-## Controls during scans
-
-- **Tap OK** = pause / resume (text waterfall, anomaly detection)
-- **Hold OK ≥0.8 s** = stop scan, return to main menu
-- **Back** = return to menu without stopping a scan, depending on Pager UI
-
-The button watcher runs `evtest /dev/input/event0` in the background and writes flag values to `/tmp/specpine_btn_evt`. If your Pager numbers input devices differently, SpecPine falls back to the first `/dev/input/event*` it finds.
 
 ---
 
 ## Troubleshooting
 
-**"spectool_raw not installed"** — Run **Install / Repair → Install** from the main menu.
+**"spectool_raw not found"** — Re-run the installer payload. The binary ships in the ZIP and should be at `bin/spectool_raw` inside the payload directory.
 
-**"Bridge exited - check Wi-Spy USB"** — Wi-Spy not detected:
+**"Bridge exited — check Wi-Spy USB"** — Wi-Spy not detected:
 ```bash
-ssh root@pineapple "lsusb"       # expect MetaGeek / 0x1781 or 0x1dd5
-ssh root@pineapple "LD_LIBRARY_PATH=/opt/spectools/lib /opt/spectools/bin/spectool_raw --list"
+ssh root@172.16.42.1 "lsusb"   # expect 0x1781 or 0x1dd5 (MetaGeek)
+ssh root@172.16.42.1 "LD_LIBRARY_PATH=/root/payloads/user/reconnaissance/specpine/lib \
+  /root/payloads/user/reconnaissance/specpine/bin/spectool_raw --list"
 ```
 
-**Library errors** —
+**Graphical waterfall leaves a blank screen** — `vtcon1` should rebind automatically on exit. If it doesn't:
 ```bash
-ssh root@pineapple "LD_LIBRARY_PATH=/opt/spectools/lib ldd /opt/spectools/bin/spectool_raw"
+ssh root@172.16.42.1 "echo 1 > /sys/class/vtconsole/vtcon1/bind"
 ```
 
-**No ringtones** — Settings → Skip Ringtone Check toggles to no, then re-launch; SpecPine reinstalls the RTTTL files into `/lib/pager/ringtones/`. Or set Mute = on if you just want silence.
+**No ringtones / tone on screenshot** — Settings → Skip Ringtone Check → off, then re-launch SpecPine to trigger the ringtone installer. Or enable Mute for silence.
 
-**Graphical waterfall leaves a blank screen on exit** — `vtcon1` should auto-rebind. If it doesn't on your firmware:
-```bash
-ssh root@pineapple "echo 1 > /sys/class/vtconsole/vtcon1/bind"
-```
-
-**Display only shows noise** — Bring an active 2.4 GHz emitter close. The Pager's antennas are far less sensitive than a desktop card.
+**Display shows only noise** — Normal for a swept analyzer in a quiet environment. Bring an active 2.4 GHz source close, or switch to 5 GHz via Settings → Default Band.
 
 ---
 
-## Rebuilding the Package
+## Rebuilding from Source
 
-From the repo root:
 ```bash
 bash scripts/package.sh
 ```
 
-Produces `pine-spectools.zip`. The legacy three-payload tree is preserved in `payloads/legacy/` for reference but is **not** included in the zip.
+Produces `pine-spectools.zip` from `payloads/specpine/` and `spectools-pineapple-build/`. Cross-compiled MIPS binaries live in `spectools-pineapple-build/bin/` — only rebuild those if you're changing the upstream `spectool sourcecode/`.

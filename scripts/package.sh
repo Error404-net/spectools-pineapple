@@ -116,6 +116,11 @@ if [ -d "${SRC_PAY}/data/theme" ]; then
     done
 fi
 
+# ── Installer payload ─────────────────────────────────────────────────────────
+mkdir -p "${STAGE_DIR}/specpine_installer"
+cp "${REPO_ROOT}/payloads/specpine_installer/payload.sh" "${STAGE_DIR}/specpine_installer/payload.sh"
+chmod 755 "${STAGE_DIR}/specpine_installer/payload.sh"
+
 # ── Instructions ──────────────────────────────────────────────────────────────
 cp "${REPO_ROOT}/INSTALL.md" "${STAGE_DIR}/INSTALL.md"
 

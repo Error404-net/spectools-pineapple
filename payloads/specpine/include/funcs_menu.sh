@@ -138,9 +138,7 @@ main_menu_hud() {
 main_menu_legacy() {
     [ "$mute" = "false" ] && led_safe MAGENTA
 
-    local items=( "Status" "Quick Scan" "Text Waterfall" "Graphical Waterfall" \
-                  "Channel Analysis" "Anomaly Detection" "Saved Sessions" \
-                  "Install" "Settings" "About" "Exit" )
+    local items=( "Text Waterfall" "Graphical Waterfall" "Settings" )
     local pick_str="\"SpecPine - Main Menu\""
     local i
     LOG blue "── SpecPine v${APP_VERSION} ──"
@@ -151,18 +149,10 @@ main_menu_legacy() {
     local resp
     resp=$(eval "LIST_PICKER ${pick_str}")
     case "$resp" in
-        "Status")                selnum=1  ;;
-        "Quick Scan")            selnum=2  ;;
-        "Text Waterfall")        selnum=3  ;;
-        "Graphical Waterfall")   selnum=4  ;;
-        "Channel Analysis")      selnum=5  ;;
-        "Anomaly Detection")     selnum=6  ;;
-        "Saved Sessions")        selnum=7  ;;
-        "Install")               selnum=8  ;;
-        "Settings")              selnum=9  ;;
-        "About")                 selnum=10 ;;
-        "Exit")                  selnum=0  ;;
-        *)                       selnum=-1 ;;   # cancelled/back → loop without exit
+        "Text Waterfall")        selnum=2 ;;
+        "Graphical Waterfall")   selnum=3 ;;
+        "Settings")              selnum=7 ;;
+        *)                       selnum=-1 ;;   # Back/cancel → payload.sh prompts to exit
     esac
 }
 
@@ -203,27 +193,26 @@ sub_menu_settings() {
         WAIT_FOR_BUTTON_PRESS A
         local resp
         resp=$(LIST_PICKER "Settings" \
-            "Default Band" "Default Mode" \
+            "Status" \
+            "Default Band" \
             "Stall Timeout" "Max Restarts" \
-            "Anomaly Threshold" "Anomaly Window" \
-            "Mute" "No-loot Mode" "GPS" \
+            "Mute" "No-loot Mode" \
             "Skip Ringtone Check" \
             "Theme" \
             "Diagnostics" \
+            "About" \
             "Reset to Defaults" "Back")
         case "$resp" in
+            "Status")              status_display ;;
             "Default Band")        setting_default_band ;;
-            "Default Mode")        setting_default_mode ;;
             "Stall Timeout")       setting_stall_timeout ;;
             "Max Restarts")        setting_max_restarts ;;
-            "Anomaly Threshold")   setting_anomaly_threshold ;;
-            "Anomaly Window")      setting_anomaly_window ;;
             "Mute")                setting_mute ;;
             "No-loot Mode")        setting_noloot ;;
-            "GPS")                 setting_gps ;;
             "Skip Ringtone Check") setting_skip_ringtones ;;
             "Theme")               sub_menu_theme ;;
             "Diagnostics")         sub_menu_diagnostics ;;
+            "About")               sub_menu_about ;;
             "Reset to Defaults")   setting_reset_defaults ;;
             *)                     return ;;
         esac
@@ -405,10 +394,9 @@ diag_test_settings_persist() {
     silent_backup=1
     config_backup
     local key val miss=0
-    for key in default_band default_mode stall_timeout max_restarts \
-               anomaly_threshold_db anomaly_window mute noloot \
-               gps_enabled skip_ask_ringtones selnum_main \
-               total_scans total_anomalies app_version; do
+    for key in default_band stall_timeout max_restarts \
+               mute noloot skip_ask_ringtones selnum_main \
+               total_scans app_version; do
         val=$(PAYLOAD_GET_CONFIG "$CONFIG_NS" "$key" 2>/dev/null)
         if [ -z "$val" ]; then
             LOG red "  ✗ ${key}: empty"
@@ -454,18 +442,10 @@ diag_test_bridge_dryrun() {
 }
 
 setting_default_band() {
-    local r; r=$(LIST_PICKER "Default Band" "Auto" "2.4 GHz" "5 GHz")
+    local r; r=$(LIST_PICKER "Default Band" "2.4 GHz" "5 GHz")
     case "$r" in
-        "Auto")    default_band="auto" ;;
         "2.4 GHz") default_band="2.4" ;;
         "5 GHz")   default_band="5" ;;
-    esac
-}
-setting_default_mode() {
-    local r; r=$(LIST_PICKER "Default Mode" "Text" "Graphical")
-    case "$r" in
-        "Text")      default_mode="text" ;;
-        "Graphical") default_mode="graphical" ;;
     esac
 }
 setting_stall_timeout() {
@@ -476,14 +456,6 @@ setting_max_restarts() {
     local r; r=$(NUMBER_PICKER "Max Restarts" "$max_restarts")
     [ -n "$r" ] && max_restarts="$r"
 }
-setting_anomaly_threshold() {
-    local r; r=$(NUMBER_PICKER "Anomaly Threshold (dB)" "$anomaly_threshold_db")
-    [ -n "$r" ] && anomaly_threshold_db="$r"
-}
-setting_anomaly_window() {
-    local r; r=$(NUMBER_PICKER "Anomaly Window (sweeps)" "$anomaly_window")
-    [ -n "$r" ] && anomaly_window="$r"
-}
 setting_mute() {
     if [ "$mute" = "true" ]; then mute="false"; else mute="true"; fi
     LOG green "Mute: ${mute}"
@@ -491,10 +463,6 @@ setting_mute() {
 setting_noloot() {
     if [ "$noloot" = "true" ]; then noloot="false"; else noloot="true"; fi
     LOG green "No-loot: ${noloot}"
-}
-setting_gps() {
-    if [ "$gps_enabled" = "true" ]; then gps_enabled="false"; else gps_enabled="true"; fi
-    LOG green "GPS: ${gps_enabled}"
 }
 setting_skip_ringtones() {
     if [ "$skip_ask_ringtones" -eq 1 ]; then skip_ask_ringtones=0; else skip_ask_ringtones=1; fi
@@ -504,15 +472,11 @@ setting_reset_defaults() {
     local resp
     resp=$(CONFIRMATION_DIALOG "Reset all settings to defaults?")
     [ "$resp" != "$DUCKYSCRIPT_USER_CONFIRMED" ] && return 0
-    default_band="auto"
-    default_mode="text"
+    default_band="2.4"
     stall_timeout=8
     max_restarts=5
-    anomaly_threshold_db=15
-    anomaly_window=10
     mute="false"
     noloot="false"
-    gps_enabled="false"
     skip_ask_ringtones=0
     LOG green "Defaults restored"
 }
@@ -632,37 +596,13 @@ The payload should bundle its own — re-deploy
 the SpecPine package."
         return 1
     fi
-
-    local r
-    r=$(LIST_PICKER "Band" "Auto" "2.4 GHz" "5 GHz" "Cancel")
-    case "$r" in
-        "Auto")    current_band="auto" ;;
-        "2.4 GHz") current_band="2.4" ;;
-        "5 GHz")   current_band="5" ;;
-        *)         LOG yellow "Cancelled — returning to menu"; show_menu_end_OK=2; return 1 ;;
-    esac
-
-    local default_name
-    default_name=$(date +%Y%m%d_%H%M%S)
-    r=$(TEXT_PICKER "Session Name" "$default_name")
-    if [ -z "$r" ]; then
-        LOG yellow "Cancelled — returning to menu"
-        show_menu_end_OK=2
-        return 1
-    fi
-    current_session_name="$r"
-
+    current_band="$default_band"
+    [ "$current_band" = "auto" ] && current_band="2.4"
+    current_session_name=$(date +%Y%m%d_%H%M%S)
     if [ "$noloot" = "true" ]; then
         current_save_loot="false"
-        LOG yellow "No-loot mode: session will live in /tmp and be wiped on exit"
     else
-        local s
-        s=$(CONFIRMATION_DIALOG "Save loot to ${LOOT_ROOT}?")
-        if [ "$s" = "$DUCKYSCRIPT_USER_CONFIRMED" ]; then
-            current_save_loot="true"
-        else
-            current_save_loot="false"
-        fi
+        current_save_loot="true"
     fi
     return 0
 }

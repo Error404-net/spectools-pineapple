@@ -81,7 +81,7 @@ APP_VERSION="1.2"
 CONFIG_NS="specpine"
 
 # ── Defaults (overridden by PAYLOAD_GET_CONFIG below) ─────────────────────
-default_band="auto"
+default_band="2.4"
 default_mode="text"
 stall_timeout=8
 max_restarts=5
@@ -227,30 +227,27 @@ while true; do
     main_option="$selnum"
 
     case "$main_option" in
-        1)  status_display ;;
-        2)  if pre_scan_dialog; then quick_scan;           fi ;;
-        3)  if pre_scan_dialog; then text_waterfall;       fi ;;
-        4)  if pre_scan_dialog; then graphical_waterfall;  fi ;;
-        5)  if pre_scan_dialog; then channel_analysis;     fi ;;
-        6)  if pre_scan_dialog; then anomaly_detection;    fi ;;
-        7)  sub_menu_sessions ;;
-        8)  sub_menu_install ;;
-        9)  sub_menu_settings ;;
-        10) sub_menu_about ;;
+        2)  if pre_scan_dialog; then text_waterfall;       fi ;;
+        3)  if pre_scan_dialog; then graphical_waterfall;  fi ;;
+        7)  sub_menu_settings ;;
         0)
-            if [ "$EXIT_PRECONFIRMED" -eq 1 ]; then
-                confirmed=1
-            else
-                resp=$(CONFIRMATION_DIALOG "Exit SpecPine?")
-                [ "$resp" = "$DUCKYSCRIPT_USER_CONFIRMED" ] && confirmed=1 || confirmed=0
-            fi
-            if [ "$confirmed" -eq 1 ]; then
+            # selnum=0 set by HUD on Back-hold (EXIT_PRECONFIRMED=1) or by
+            # legacy Back-press path below — always pre-confirmed by the time
+            # we get here, so no second dialog needed.
+            LOG cyan "── shall we play a game? ──"
+            [ "$mute" = "false" ] && RINGTONE "Flutter"
+            exit 0   # trap → cleanup
+            ;;
+        -1)
+            # Back at legacy LIST_PICKER main menu → prompt to exit
+            local _exit_resp
+            _exit_resp=$(CONFIRMATION_DIALOG "Exit SpecPine?")
+            if [ "$_exit_resp" = "$DUCKYSCRIPT_USER_CONFIRMED" ]; then
                 LOG cyan "── shall we play a game? ──"
                 [ "$mute" = "false" ] && RINGTONE "Flutter"
-                exit 0   # trap → cleanup
+                exit 0
             fi
             ;;
-        -1) ;;   # cancelled / Back at LIST_PICKER → loop and re-show menu
         *)  ;;
     esac
 

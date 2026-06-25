@@ -530,20 +530,21 @@ check_dpad() {
     # unresponsive (the text/ASCII renderer, much lighter on CPU, was not
     # reported broken). BTN_SOUTH/BTN_EAST lines are left untouched here --
     # check_cancel() does its own filtering of those.
-    local dpad_out up_ts down_ts left_hit right_hit _kind _val
+    local dpad_out down_ts down_rel left_hit right_hit _kind _val
     dpad_out=$(awk -v tmpf="${KEYCKTMP_FILE}.tmp" '
         function getts(l,    a,b) {
             split(l, a, "time "); split(a[2], b, ",")
             return b[1]
         }
-        /\(KEY_UP\), value 1/    { up_line = $0; next }
+        /\(KEY_UP\), value 1/    { next }                   # consume; no action (prevents ANYBACK leak)
         /\(KEY_DOWN\), value 1/  { down_line = $0; next }
-        /\(KEY_LEFT\), value 1/  { left_hit = 1; next }
-        /\(KEY_RIGHT\), value 1/ { right_hit = 1; next }
+        /\(KEY_DOWN\), value 0/  { down_rel = 1;   next }  # release clears hold timer
+        /\(KEY_LEFT\), value 1/  { left_hit = 1;   next }
+        /\(KEY_RIGHT\), value 1/ { right_hit = 1;  next }
         { print > tmpf }
         END {
-            if (up_line)    print "UP " getts(up_line)
             if (down_line)  print "DOWN " getts(down_line)
+            if (down_rel)   print "DREL"
             if (left_hit)   print "LEFT"
             if (right_hit)  print "RIGHT"
         }
@@ -551,73 +552,29 @@ check_dpad() {
     cat "${KEYCKTMP_FILE}.tmp" > "$KEYCKTMP_FILE" 2>/dev/null
     rm -f "${KEYCKTMP_FILE}.tmp"
 
-    up_ts=""; down_ts=""; left_hit=""; right_hit=""
+    down_ts=""; down_rel=""; left_hit=""; right_hit=""
     while IFS=' ' read -r _kind _val; do
         case "$_kind" in
-            UP)    up_ts="$_val" ;;
             DOWN)  down_ts="$_val" ;;
+            DREL)  down_rel=1 ;;
             LEFT)  left_hit=1 ;;
             RIGHT) right_hit=1 ;;
         esac
     done <<EOF
 $dpad_out
 EOF
-    if [ -n "$up_ts" ] || [ -n "$down_ts" ] || [ -n "$left_hit" ] || [ -n "$right_hit" ]; then
-        echo "[dpad] up=${up_ts:--} dn=${down_ts:--} L=${left_hit:--} R=${right_hit:--}" >> "$LOG_FILE"
+    if [ -n "$down_ts" ] || [ -n "$down_rel" ] || [ -n "$left_hit" ] || [ -n "$right_hit" ]; then
+        echo "[dpad] dn=${down_ts:--} drel=${down_rel:--} L=${left_hit:--} R=${right_hit:--}" >> "$LOG_FILE"
     fi
 
-    # This loop polls every ~150ms, but the combo window is 400ms -- two
-    # *separate* physical button presses (UP and DOWN) very rarely land in
-    # the exact same poll's worth of evtest output, even when the user is
-    # genuinely trying to press them together. The old code required both to
-    # show up in the same tick, so whichever one arrived first got matched
-    # against nothing, fell through to neither branch below, and was then
-    # unconditionally discarded by the grep -v cleanup at the bottom -- by
-    # the time its partner arrived on the next tick, the first press was
-    # already gone and the combo could never fire. This is the root cause of
-    # "screenshot does not work with up/down."
-    #
-    # Fix: carry a single unpaired UP or DOWN press forward (with its real
-    # evtest timestamp, so the eventual delta_ms check is still accurate)
-    # across ticks via $DPAD_PENDING_FILE, instead of dropping it the instant
-    # this tick doesn't also contain its partner.
-    local pending pending_key pending_ts pending_age
-    if [ -s "$DPAD_PENDING_FILE" ]; then
-        pending=$(cat "$DPAD_PENDING_FILE")
-        pending_key="${pending%% *}"
-        pending="${pending#* }"
-        pending_ts="${pending%% *}"
-        if [ "$pending_key" = "up" ] && [ -z "$up_ts" ]; then
-            up_ts="$pending_ts"
-        elif [ "$pending_key" = "down" ] && [ -z "$down_ts" ]; then
-            down_ts="$pending_ts"
-        fi
+    # DOWN pressed: start hold timer. Only start if not already timing (so
+    # repeated value 1 events from autorepeat don't reset the clock).
+    if [ -n "$down_ts" ] && [ ! -s "$DPAD_PENDING_FILE" ]; then
+        date +%s > "$DPAD_PENDING_FILE"
     fi
-
-    if [ -n "$up_ts" ] && [ -n "$down_ts" ]; then
-        local delta_ms
-        delta_ms=$(awk -v a="$up_ts" -v b="$down_ts" \
-            'BEGIN{ d=a-b; if (d<0) d=-d; printf "%.0f", d*1000 }')
-        # UP and DOWN within 400ms of each other = combo press
-        if [ "${delta_ms:-9999}" -le 400 ]; then
-            echo "1" > "$SCREENSHOT_EVT_FILE"
-        fi
+    # DOWN released before the 2s threshold: cancel timer; quick tap = no screenshot
+    if [ -n "$down_rel" ]; then
         : > "$DPAD_PENDING_FILE"
-    elif [ -n "$up_ts" ]; then
-        echo "up ${up_ts} $(date +%s)" > "$DPAD_PENDING_FILE"
-    elif [ -n "$down_ts" ]; then
-        echo "down ${down_ts} $(date +%s)" > "$DPAD_PENDING_FILE"
-    elif [ -s "$DPAD_PENDING_FILE" ]; then
-        # No new UP/DOWN this tick -- expire a pending half-combo after ~1s
-        # of real wall-clock waiting (using our own clock here, not evtest's,
-        # since this is just "how long have we been waiting", not a combo
-        # timing comparison) so a single stray tap doesn't sit around
-        # forever waiting for a partner that never arrives.
-        pending=$(cat "$DPAD_PENDING_FILE")
-        pending_age="${pending##* }"
-        if [ -n "$pending_age" ] && [ "$(( $(date +%s) - pending_age ))" -ge 1 ]; then
-            : > "$DPAD_PENDING_FILE"
-        fi
     fi
 
     if [ -n "$left_hit" ]; then

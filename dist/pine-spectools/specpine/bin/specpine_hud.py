@@ -86,19 +86,55 @@ wf._GLYPHS.update({
     '=': [0x00, 0x00, 0x1F, 0x00, 0x1F, 0x00, 0x00],
 })
 
-ROW_H = 17
-MENU_Y0 = 16
-FOOTER_H = 10
 
-C_HILITE = (0, 70, 80)
-C_EXIT = (200, 40, 40)
+def _text2x(fb: bytearray, text: str, x: int, y: int, color: int) -> None:
+    """Draw text at 2× scale. Each pixel becomes a 2×2 block; char stride = 12."""
+    for i, ch in enumerate(text):
+        glyph = wf._GLYPHS.get(ch.upper(), wf._GLYPHS.get(' ', [0] * 7))
+        cx = x + i * 12
+        for row, bits in enumerate(glyph):
+            for col in range(5):
+                if bits & (1 << (4 - col)):
+                    px, py = cx + col * 2, y + row * 2
+                    wf._put(fb, px,     py,     color)
+                    wf._put(fb, px + 1, py,     color)
+                    wf._put(fb, px,     py + 1, color)
+                    wf._put(fb, px + 1, py + 1, color)
+
+
+def _scanlines(fb: bytearray, y0: int, y1: int) -> None:
+    """Overlay subtle dark scanlines between rows for CRT effect."""
+    dark = wf.rgb565(*C_SCAN_DARK)
+    for ly in range(y0, y1, 4):   # every 4th row slightly darker
+        wf._fill(fb, 0, ly, wf.IMG_W, 1, dark)
+
+
+# Layout — 4 menu items with generous row spacing
+# Total vertical budget: IMG_H=222. 30 + 4 + 4*38 + 20 = 206 ≤ 222 ✓
+HEADER_H  = 30    # header bar height
+FOOTER_H  = 20    # footer bar height
+ROW_H     = 38    # per menu row (14px text + padding for spacious look)
+MENU_Y0   = HEADER_H + 4   # first item y (4px gap after header bar)
+
+BACK_HOLD_SECS = 2.0
+
+# Kept for compatibility; new draw_menu() uses inline WarGames palette instead.
+C_HILITE    = (0, 70, 80)
+C_SCAN_DARK = (7, 11, 19)
+C_PROGRESS  = (0, 160, 120)
 
 EVT_CANDIDATES_DIR = "/dev/input"
 EVT_DEFAULT = "/dev/input/event0"
 
-_UP_RE = re.compile(r"\(KEY_UP\), value 1")
+_UP_RE   = re.compile(r"\(KEY_UP\), value 1")
 _DOWN_RE = re.compile(r"\(KEY_DOWN\), value 1")
-_OK_RE = re.compile(r"\(BTN_EAST\), value 1")
+_OK_RE   = re.compile(r"\(BTN_EAST\), value 1")
+# Back button: any EV_KEY press/release that isn't the d-pad or OK.
+# Using broad match after the specific elif checks ensures d-pad/OK are
+# never double-counted; the DPAD/OK exclusion regex is just belt-and-suspenders.
+_DPAD_OK_RE    = re.compile(r"KEY_UP|KEY_DOWN|KEY_LEFT|KEY_RIGHT|BTN_EAST")
+_BACK_PRESS_RE = re.compile(r"type 1.*value 1")
+_BACK_REL_RE   = re.compile(r"type 1.*value 0")
 
 # Debug trail for diagnosing input issues without a live session: every raw
 # evtest line and every parsed event gets appended here. Caller (payload.sh's
@@ -241,44 +277,74 @@ def poll(proc: "subprocess.Popen | None", deadline: float) -> list[str]:
             out.append("down")
         elif _OK_RE.search(line):
             out.append("ok")
+        elif _BACK_PRESS_RE.search(line) and not _DPAD_OK_RE.search(line):
+            out.append("back_press")
+        elif _BACK_REL_RE.search(line) and not _DPAD_OK_RE.search(line):
+            out.append("back_release")
     if out:
         _dbg(f"poll: parsed events {out}")
     return out
 
 
-def draw_menu(fb: bytearray, items: list[tuple[str, int]], cursor: int, app_version: str) -> None:
-    bg = wf.rgb565(*wf.C_BG)
+def draw_menu(
+    fb: bytearray,
+    items: list[tuple[str, int]],
+    cursor: int,
+    app_version: str,
+    back_hold_frac: float = 0.0,   # 0.0–1.0 progress while holding Back
+) -> None:
+    # WarGames CRT phosphor palette — matches the boot splash
+    bg     = wf.rgb565(  0,   8,   4)   # near-black with green tint
+    bar_bg = wf.rgb565(  0,  20,  10)   # slightly lighter bar
+    green  = wf.rgb565(  0, 220, 100)   # bright phosphor green (selected / accents)
+    dim    = wf.rgb565(  0,  80,  40)   # dim green (unselected items / hints)
+    grid_c = wf.rgb565(  0,  35,  18)   # very faint grid lines
+    amber  = wf.rgb565(255, 180,   0)   # amber (title / hold-bar)
+
+    # ── background + horizontal grid ──────────────────────────────────────
     wf._fill(fb, 0, 0, IMG_W, IMG_H, bg)
+    for gy in range(0, IMG_H, 24):
+        wf._fill(fb, 0, gy, IMG_W, 1, grid_c)
 
-    bar = wf.rgb565(*wf.C_BAR)
-    wf._fill(fb, 0, 0, IMG_W, 14, bar)
-    white = wf.rgb565(*wf.C_WHITE)
-    teal = wf.rgb565(*wf.C_TEAL)
-    wf._text(fb, f"SpecPine v{app_version}", 4, 4, white)
-    title2 = "MAIN MENU"
-    wf._text(fb, title2, IMG_W - len(title2) * 6 - 4, 4, teal)
-    wf._hline(fb, 0, IMG_W - 1, 14, teal)
+    # ── 1-px border ───────────────────────────────────────────────────────
+    wf._fill(fb, 0, 0, IMG_W, 1, dim)
+    wf._fill(fb, 0, IMG_H - 1, IMG_W, 1, dim)
+    wf._fill(fb, 0, 0, 1, IMG_H, dim)
+    wf._fill(fb, IMG_W - 1, 0, 1, IMG_H, dim)
 
-    gray = wf.rgb565(*wf.C_GRAY)
-    hilite = wf.rgb565(*C_HILITE)
-    red = wf.rgb565(*C_EXIT)
-    for i, (label, idx) in enumerate(items):
+    # ── header bar ────────────────────────────────────────────────────────
+    wf._fill(fb, 0, 0, IMG_W, HEADER_H, bar_bg)
+    _text2x(fb, "SPECPINE", 8, 8, amber)
+    ver_label = f"v{app_version}"
+    _text2x(fb, ver_label, IMG_W - len(ver_label) * 12 - 8, 8, dim)
+    wf._hline(fb, 0, IMG_W - 1, HEADER_H - 1, green)
+    wf._hline(fb, 0, IMG_W - 1, HEADER_H - 2, green)
+
+    # ── menu items ────────────────────────────────────────────────────────
+    for i, (label, _idx) in enumerate(items):
         y = MENU_Y0 + i * ROW_H
         if y + ROW_H > IMG_H - FOOTER_H:
             break
+        ty = y + (ROW_H - 14) // 2   # vertically center 14px (2x) text in row
         if i == cursor:
-            wf._fill(fb, 0, y, IMG_W, ROW_H - 1, hilite)
-            text_col = white
-        elif idx == 0:
-            text_col = red
+            _text2x(fb, f"> {label}", 8, ty, green)
         else:
-            text_col = gray
-        wf._text(fb, label, 8, y + 5, text_col)
+            _text2x(fb, f"  {label}", 8, ty, dim)
 
+    # ── footer bar ────────────────────────────────────────────────────────
     footer_y0 = IMG_H - FOOTER_H
-    wf._fill(fb, 0, footer_y0, IMG_W, FOOTER_H, bar)
-    wf._hline(fb, 0, IMG_W - 1, footer_y0, teal)
-    wf._text(fb, "UP/DOWN:move  OK:select", 4, footer_y0 + 2, gray)
+    wf._fill(fb, 0, footer_y0, IMG_W, FOOTER_H, bar_bg)
+    wf._hline(fb, 0, IMG_W - 1, footer_y0,     green)
+    wf._hline(fb, 0, IMG_W - 1, footer_y0 + 1, green)
+
+    if back_hold_frac > 0.0:
+        bar_w = int(IMG_W * min(back_hold_frac, 1.0))
+        wf._fill(fb, 0, footer_y0 + 3, bar_w, FOOTER_H - 5, amber)
+        hint = "HOLD BACK:EXIT"
+        _text2x(fb, hint, (IMG_W - len(hint) * 12) // 2, footer_y0 + 3, bar_bg)
+    else:
+        hint = "UP/DN:NAV  OK:SEL  HOLD.B:EXIT"
+        _text2x(fb, hint, (IMG_W - len(hint) * 12) // 2, footer_y0 + 3, dim)
 
 
 def draw_confirm(fb: bytearray, app_version: str) -> None:
@@ -320,10 +386,9 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     items: list[tuple[str, int]] = [
-        ("Status", 1), ("Quick Scan", 2), ("Text Waterfall", 3),
-        ("Graphical Waterfall", 4), ("Channel Analysis", 5),
-        ("Anomaly Detection", 6), ("Saved Sessions", 7),
-        ("Install", 8), ("Settings", 9), ("About", 10), ("Exit", 0),
+        ("WATERFALL/ASCII",  2),
+        ("WATERFALL/GRAPH",  3),
+        ("SYS/CONFIG",       7),
     ]
 
     # Belt-and-suspenders, same pattern as spectools_waterfall_fb.py: any
@@ -367,6 +432,7 @@ def main(argv: list[str] | None = None) -> int:
     cursor = 0
     n = len(items)
     result: int | None = None
+    back_pressed_at: float | None = None
 
     draw_menu(fb, items, cursor, args.app_version)
     flush(fb)
@@ -379,23 +445,38 @@ def main(argv: list[str] | None = None) -> int:
                 if ev == "up":
                     cursor = (cursor - 1) % n
                     redraw = True
+                    back_pressed_at = None   # navigation cancels any hold
                 elif ev == "down":
                     cursor = (cursor + 1) % n
                     redraw = True
+                    back_pressed_at = None
                 elif ev == "ok":
-                    label, idx = items[cursor]
-                    if idx == 0:
-                        if confirm_exit(fb, flush, proc, args.app_version):
-                            result = 0
-                        else:
-                            redraw = True
-                    else:
-                        result = idx
+                    result = items[cursor][1]
                     break
+                elif ev == "back_press":
+                    if back_pressed_at is None:
+                        back_pressed_at = time.monotonic()
+                        redraw = True
+                elif ev == "back_release":
+                    back_pressed_at = None
+                    redraw = True   # clear the progress bar
+
             if result is not None:
                 break
+
+            # Back-hold threshold: exit without second confirmation
+            if back_pressed_at is not None:
+                elapsed = time.monotonic() - back_pressed_at
+                if elapsed >= BACK_HOLD_SECS:
+                    result = 0
+                    break
+                redraw = True   # keep refreshing progress bar
+
             if redraw:
-                draw_menu(fb, items, cursor, args.app_version)
+                frac = 0.0
+                if back_pressed_at is not None:
+                    frac = (time.monotonic() - back_pressed_at) / BACK_HOLD_SECS
+                draw_menu(fb, items, cursor, args.app_version, back_hold_frac=frac)
                 flush(fb)
     finally:
         try:
