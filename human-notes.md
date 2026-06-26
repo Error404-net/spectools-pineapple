@@ -11,6 +11,12 @@ spectools_waterfall_pager.py — the text waterfall, which doesn't touch the fra
 
 remove sessions, anomoly detection, channel analysis 
 
+next iteration:
+
+Can we also display what's on the LCD to the virtual pager? I know your doing some trick to overtake what is displayed, but are there any other ways to also keep the waterfall showing on the LCD as this was our biggest issue in creating this app.
+
+Create an installer payload as I prefer that over terminal, I just want them to scp the zip over, and extract in a one line command also chmod + x. There would be in the specpine directory an install payload, thDetect and install missing dependencies (`python3`, `evtest`) via opkg — prompts once, needs internet. As i do not see a specpine installer. We'll test with a factory reset after we finish iterating other ui bugs.
+
 
 Questions:
 Does the Virtual Pager mirrors raw /dev/fb0 or mirrors pineapple's own internal state, since that determines whether physical and Virtual Pager testing are even exercising the same code path. Post this to their Discord (#wifi-pineapple-pager) for the fastest read from someone who'd know.

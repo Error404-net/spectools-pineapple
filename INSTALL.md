@@ -78,22 +78,21 @@ Plug in the Wi-Spy DBx, then launch **SpecPine** from the Pager.
 
 The boot splash plays, then the main menu appears:
 
-| Menu item       | What it does                                                                      |
-| --------------- | --------------------------------------------------------------------------------- |
-| WATERFALL/ASCII | Live ASCII waterfall on the Pager display. Tap OK = pause, hold OK ≥0.8s = stop. |
-| WATERFALL/GRAPH | Full-color 480×222 RGB565 waterfall on `/dev/fb0`. Hold OK ≥0.8s to stop.        |
-| SYS/CONFIG      | Settings, diagnostics, about, reset to defaults.                                  |
+| Menu item         | What it does                                                               |
+| ----------------- | -------------------------------------------------------------------------- |
+| 2.4GHz Waterfall  | Full-color 480×222 RGB565 waterfall on `/dev/fb0`, 2.4 GHz band.          |
+| 5GHz Waterfall    | Full-color 480×222 RGB565 waterfall on `/dev/fb0`, 5 GHz band.            |
+| SYS/CONFIG        | Settings, diagnostics, about, reset to defaults.                           |
 
-Scans launch immediately with no pre-run prompts. Band is set from **Settings → Default Band** (2.4 GHz or 5 GHz). Sessions are saved automatically to `/root/loot/specpine/` unless No-loot mode is on.
+Scans launch immediately with no pre-run prompts. Sessions are saved automatically to `/root/loot/specpine/` unless No-loot mode is on.
 
 ### Controls
 
-| Input          | Action                                                  |
-| -------------- | ------------------------------------------------------- |
-| Tap OK         | Pause / resume (ASCII waterfall)                        |
-| Hold OK ≥0.8s  | Stop scan, return to menu                               |
-| Hold Back ≥2s  | Exit SpecPine                                           |
-| Hold DOWN ≥2s  | Save framebuffer screenshot (graphical waterfall only)  |
+| Input          | Action                                 |
+| -------------- | -------------------------------------- |
+| Hold OK ≥0.8s  | Stop scan, return to menu              |
+| Hold Back ≥2s  | Exit SpecPine                          |
+| Hold DOWN ≥2s  | Save framebuffer screenshot            |
 
 ### Settings
 
@@ -101,7 +100,6 @@ Accessible from **SYS/CONFIG**:
 
 | Setting             | Default  | Description                                       |
 | ------------------- | -------- | ------------------------------------------------- |
-| Default Band        | 2.4 GHz  | Band used for all scans                           |
 | Stall Timeout       | 8s       | Seconds of no data before feed recovery attempt   |
 | Max Restarts        | 5        | Max bridge restart attempts before giving up      |
 | Mute                | off      | Suppress all ringtones                            |

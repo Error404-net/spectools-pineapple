@@ -138,7 +138,7 @@ main_menu_hud() {
 main_menu_legacy() {
     [ "$mute" = "false" ] && led_safe MAGENTA
 
-    local items=( "Text Waterfall" "Graphical Waterfall" "Settings" )
+    local items=( "2.4GHz Waterfall" "5GHz Waterfall" "Settings" )
     local pick_str="\"SpecPine - Main Menu\""
     local i
     LOG blue "── SpecPine v${APP_VERSION} ──"
@@ -149,10 +149,10 @@ main_menu_legacy() {
     local resp
     resp=$(eval "LIST_PICKER ${pick_str}")
     case "$resp" in
-        "Text Waterfall")        selnum=2 ;;
-        "Graphical Waterfall")   selnum=3 ;;
-        "Settings")              selnum=7 ;;
-        *)                       selnum=-1 ;;   # Back/cancel → payload.sh prompts to exit
+        "2.4GHz Waterfall")  selnum=2 ;;
+        "5GHz Waterfall")    selnum=3 ;;
+        "Settings")          selnum=7 ;;
+        *)                   selnum=-1 ;;   # Back/cancel → payload.sh prompts to exit
     esac
 }
 
@@ -186,15 +186,12 @@ sub_menu_settings() {
         settings_check
         show_ansi settings
         LOG blue "── Settings ──"
-        LOG "Band: ${default_band}    Mode: ${default_mode}"
         LOG "Stall: ${stall_timeout}s   Restart: ${max_restarts}"
-        LOG "Anom: ${anomaly_threshold_db}dB / ${anomaly_window} sweeps"
-        LOG "Audio: ${mute_disp}   Loot: ${noloot_disp}   GPS: ${gps_disp}"
+        LOG "Audio: ${mute_disp}   Loot: ${noloot_disp}"
         WAIT_FOR_BUTTON_PRESS A
         local resp
         resp=$(LIST_PICKER "Settings" \
             "Status" \
-            "Default Band" \
             "Stall Timeout" "Max Restarts" \
             "Mute" "No-loot Mode" \
             "Skip Ringtone Check" \
@@ -204,7 +201,6 @@ sub_menu_settings() {
             "Reset to Defaults" "Back")
         case "$resp" in
             "Status")              status_display ;;
-            "Default Band")        setting_default_band ;;
             "Stall Timeout")       setting_stall_timeout ;;
             "Max Restarts")        setting_max_restarts ;;
             "Mute")                setting_mute ;;
@@ -441,13 +437,6 @@ diag_test_bridge_dryrun() {
     show_menu_end_OK=2
 }
 
-setting_default_band() {
-    local r; r=$(LIST_PICKER "Default Band" "2.4 GHz" "5 GHz")
-    case "$r" in
-        "2.4 GHz") default_band="2.4" ;;
-        "5 GHz")   default_band="5" ;;
-    esac
-}
 setting_stall_timeout() {
     local r; r=$(NUMBER_PICKER "Stall Timeout (s)" "$stall_timeout")
     [ -n "$r" ] && stall_timeout="$r"
@@ -596,8 +585,6 @@ The payload should bundle its own — re-deploy
 the SpecPine package."
         return 1
     fi
-    current_band="$default_band"
-    [ "$current_band" = "auto" ] && current_band="2.4"
     current_session_name=""
     if [ "$noloot" = "true" ]; then
         current_save_loot="false"

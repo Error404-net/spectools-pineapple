@@ -1,126 +1,5 @@
-# funcs_scan.sh — SpecPine scan modes (5)
+# funcs_scan.sh — SpecPine scan modes
 # (sourced by payload.sh; uses globals defined there)
-
-# ── Quick Scan: ~3 s, parse last sweep stats ──────────────────────────────
-quick_scan() {
-    make_session_dir "${current_session_name:-quick}"
-    mark_session_started "$SESSION_DIR" "quick"
-    show_ansi quick_scan
-    LOG blue "── Quick Scan ──"
-    led_safe R 255 G 165 B 0
-    ringtone_play "GlitchHack"
-    : > "$KEYCKTMP_FILE"
-    : > "$BTN_EVT_FILE"
-    if ! start_bridge "$SESSION_DIR"; then
-        mark_session_failed "$SESSION_DIR" "quick"
-        LOG yellow "Session log: $SESSION_DIR"
-        show_menu_end_OK=2
-        return 1
-    fi
-    sleep 3
-    stop_bridge
-
-    local last
-    last=$(grep '"type":"sweep"' "$EVENTS_FILE" 2>/dev/null | tail -1)
-    if [ -z "$last" ]; then
-        led_safe R 255 G 255 B 0
-        LOG yellow "No sweep data captured"
-        mark_session_failed "$SESSION_DIR" "quick" "no sweep events received"
-        show_menu_end_OK=2
-        return 1
-    fi
-    local stats mn mx av
-    stats=$(parse_sweep_stats "$last")
-    set -- $stats; mn="$1"; mx="$2"; av="$3"
-
-    led_safe R 0 G 255 B 0
-    LOG green "Quick Scan complete"
-    LOG       "  band: ${current_band}"
-    LOG       "  min : ${mn} dBm"
-    LOG       "  max : ${mx} dBm"
-    LOG       "  avg : ${av} dBm"
-    if [ "$current_save_loot" = "true" ]; then
-        cp "$EVENTS_FILE" "${SESSION_DIR}/events.jsonl" 2>/dev/null || true
-    fi
-    mark_session_success "$SESSION_DIR" "quick"
-    ringtone_play "ScaleTrill"
-    total_scans=$((total_scans+1))
-    show_menu_end_OK=2
-}
-
-# ── Text Waterfall (LOG-based, 5-color ASCII block glyphs) ───────────────
-text_waterfall() {
-    [ "$current_band" = "auto" ] && current_band="2.4"
-    make_session_dir "${current_session_name:-text}"
-    mark_session_started "$SESSION_DIR" "text"
-    show_ansi text_waterfall
-    LOG blue "── ASCII Waterfall ──"
-    # Start evtest BEFORE bridge so any stale BTN_SOUTH events from the
-    # previous session drain through evtest into KEYCKTMP_FILE first; the
-    # sleep + file clear below then wipe them before start_bridge's cancel
-    # check runs.
-    start_evtest
-    sleep 0.5
-    : > "$KEYCKTMP_FILE"
-    : > "$BTN_EVT_FILE"
-    if ! start_bridge "$SESSION_DIR"; then
-        mark_session_failed "$SESSION_DIR" "text"
-        killall evtest 2>/dev/null || true
-        EVTEST_PID=""
-        LOG yellow "Session log: $SESSION_DIR"
-        show_menu_end_OK=2
-        return 1
-    fi
-    ringtone_play "GlitchHack"
-    led_safe R 0 G 255 B 0
-    LOG green "Scanning — tap OK to pause, hold OK ≥0.8s to stop"
-
-    # Process substitution keeps the while-loop in the parent shell so
-    # `break` propagates and total_scans / SESSION_DIR mutations stick.
-    while IFS= read -r wfline; do
-        check_cancel
-        if is_btn_stopped; then break; fi
-        if is_btn_paused; then
-            LOG yellow "[paused] tap OK to resume"
-            while is_btn_paused; do
-                sleep 0.4
-                check_cancel
-                is_btn_stopped && break 2
-            done
-            LOG green "[resumed]"
-        fi
-        # 5-tier color tags emitted by the renderer based on peak dBm.
-        # Untagged lines (headers, status) pass through with default color.
-        case "$wfline" in
-            R:*) LOG red    "${wfline#R:}" ;;
-            Y:*) LOG yellow "${wfline#Y:}" ;;
-            G:*) LOG green  "${wfline#G:}" ;;
-            C:*) LOG cyan   "${wfline#C:}" ;;
-            B:*) LOG blue   "${wfline#B:}" ;;
-            *)   LOG        "$wfline"      ;;
-        esac
-    done < <(python3 "$RENDERER_ASCII_BIN" \
-                --events-file "$EVENTS_FILE" \
-                --band "$current_band" \
-                --follow \
-                --poll-interval 0.05 \
-                2>/dev/null)
-
-    stop_bridge
-    killall evtest 2>/dev/null || true
-    EVTEST_PID=""
-    clear_btn_evt
-
-    if [ "$current_save_loot" = "true" ] && [ -f "$EVENTS_FILE" ]; then
-        cp "$EVENTS_FILE" "${SESSION_DIR}/events.jsonl" 2>/dev/null || true
-    fi
-    mark_session_success "$SESSION_DIR" "text"
-    led_safe R 0 G 0 B 128
-    LOG       "──────────────────────────────────────────"
-    LOG green "Waterfall stopped"
-    total_scans=$((total_scans+1))
-    show_menu_end_OK=2
-}
 
 # ── Graphical Waterfall (RGB565 framebuffer) ──────────────────────────────
 graphical_waterfall() {
@@ -212,7 +91,7 @@ graphical_waterfall() {
 
     clear_dpad_evt
     clear_screenshot_evt
-    local shot_n=0 _down_hold_start=""
+    local shot_n=0 _down_hold_start="" _last_shot_t=0
 
     # Stall watchdog: if EVENTS_FILE stops growing (bridge died, USB hiccup,
     # device went unresponsive mid-sweep) the renderer just sits there idle
@@ -274,26 +153,33 @@ graphical_waterfall() {
 
         if [ -s "$DPAD_PENDING_FILE" ]; then
             _down_hold_start=$(cat "$DPAD_PENDING_FILE" 2>/dev/null)
-            if [ -n "$_down_hold_start" ] && [ $(( $(date +%s) - _down_hold_start )) -ge 2 ]; then
+            local _now; _now=$(date +%s)
+            if [ -n "$_down_hold_start" ] && [ $(( _now - _down_hold_start )) -ge 2 ]; then
                 : > "$DPAD_PENDING_FILE"
-                shot_n=$((shot_n+1))
-                local shot_path="${SESSION_DIR}/screenshot_$(date +%Y%m%d_%H%M%S)_${shot_n}.bmp"
-                echo "[wf] screenshot triggered (DOWN held 2s)" >> "$LOG_FILE"
-                if python3 "$FB_SCREENSHOT_BIN" "$shot_path" >> "$LOG_FILE" 2>&1; then
-                    echo "[wf] screenshot ok: ${shot_path##*/}" >> "$LOG_FILE"
-                    # Pineapple is SIGSTOPped by the renderer; pause the renderer,
-                    # briefly resume pineapple so LOG and RINGTONE work, then
-                    # stop pineapple again and resume the renderer.
+                # ponytail: 3s cooldown stops evtest autorepeat DOWN events from
+                # immediately re-arming DPAD_PENDING_FILE and looping screenshots.
+                if [ $(( _now - _last_shot_t )) -ge 3 ]; then
+                    _last_shot_t="$_now"
+                    shot_n=$((shot_n+1))
+                    local shot_path="${SESSION_DIR}/screenshot_$(date +%Y%m%d_%H%M%S)_${shot_n}.bmp"
+                    echo "[wf] screenshot triggered (DOWN held 2s)" >> "$LOG_FILE"
+                    local _shot_ok=0
+                    python3 "$FB_SCREENSHOT_BIN" "$shot_path" >> "$LOG_FILE" 2>&1 && _shot_ok=1
                     kill -STOP "$RENDERER_PID" 2>/dev/null || true
                     local _pp; _pp=$(pidof pineapple 2>/dev/null | awk '{print $1}')
                     [ -n "$_pp" ] && kill -CONT "$_pp" 2>/dev/null || true
-                    LOG green "SCREENSHOT: ${shot_path##*/}"
-                    RINGTONE "Achievement" 2>/dev/null || true
-                    sleep 0.6
+                    sleep 0.15
+                    if [ "$_shot_ok" -eq 1 ]; then
+                        echo "[wf] screenshot ok: ${shot_path##*/}" >> "$LOG_FILE"
+                        LOG green "SCREENSHOT: ${shot_path##*/}"
+                        [ "$mute" = "false" ] && RINGTONE "Achievement" 2>/dev/null || true
+                        sleep 1.5
+                    else
+                        LOG red "Screenshot failed"
+                        sleep 0.3
+                    fi
                     [ -n "$_pp" ] && kill -STOP "$_pp" 2>/dev/null || true
                     kill -CONT "$RENDERER_PID" 2>/dev/null || true
-                else
-                    LOG red "Screenshot failed (see log)"
                 fi
             fi
         fi

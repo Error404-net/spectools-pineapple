@@ -386,8 +386,8 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     items: list[tuple[str, int]] = [
-        ("WATERFALL/ASCII",  2),
-        ("WATERFALL/GRAPH",  3),
+        ("2.4GHZ WATERFALL", 2),
+        ("5GHZ WATERFALL",   3),
         ("SYS/CONFIG",       7),
     ]
 

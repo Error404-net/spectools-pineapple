@@ -227,8 +227,8 @@ while true; do
     main_option="$selnum"
 
     case "$main_option" in
-        2)  if pre_scan_dialog; then text_waterfall;       fi ;;
-        3)  if pre_scan_dialog; then graphical_waterfall;  fi ;;
+        2)  if pre_scan_dialog; then current_band="2.4"; graphical_waterfall; fi ;;
+        3)  if pre_scan_dialog; then current_band="5";   graphical_waterfall; fi ;;
         7)  sub_menu_settings ;;
         0)
             # selnum=0 set by HUD on Back-hold (EXIT_PRECONFIRMED=1) or by
