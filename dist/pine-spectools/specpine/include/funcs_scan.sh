@@ -48,25 +48,22 @@ quick_scan() {
     show_menu_end_OK=2
 }
 
-# ── ASCII Block-Glyph Waterfall (framebuffer, WarGames palette) ──────────
+# ── Text Waterfall (LOG-based, 5-color ASCII block glyphs) ───────────────
 text_waterfall() {
-    if [ ! -e /dev/fb0 ]; then
-        ERROR_DIALOG "/dev/fb0 not available on this device."
-        show_menu_end_OK=2
-        return 1
-    fi
     [ "$current_band" = "auto" ] && current_band="2.4"
     make_session_dir "${current_session_name:-text}"
     mark_session_started "$SESSION_DIR" "text"
+    show_ansi text_waterfall
     LOG blue "── ASCII Waterfall ──"
-    LOG       "Display takes over. Hold OK ≥0.8s to stop."
+    # Start evtest BEFORE bridge so any stale BTN_SOUTH events from the
+    # previous session drain through evtest into KEYCKTMP_FILE first; the
+    # sleep + file clear below then wipe them before start_bridge's cancel
+    # check runs.
     start_evtest
     sleep 0.5
     : > "$KEYCKTMP_FILE"
     : > "$BTN_EVT_FILE"
-    local _sb_ret
-    start_bridge "$SESSION_DIR" "$current_band"; _sb_ret=$?
-    if [ "$_sb_ret" -ne 0 ]; then
+    if ! start_bridge "$SESSION_DIR"; then
         mark_session_failed "$SESSION_DIR" "text"
         killall evtest 2>/dev/null || true
         EVTEST_PID=""
@@ -76,146 +73,51 @@ text_waterfall() {
     fi
     ringtone_play "GlitchHack"
     led_safe R 0 G 255 B 0
-    LOG cyan "Hold DOWN 2s: screenshot   Hold Back 2s: exit"
+    LOG green "Scanning — tap OK to pause, hold OK ≥0.8s to stop"
 
-    python3 "$RENDERER_ASCII_BIN" \
-        --events-file "$EVENTS_FILE" \
-        --btn-file "$BTN_EVT_FILE" \
-        --follow \
-        --poll-interval 0.05 \
-        --fps 6 \
-        >> "$LOG_FILE" 2>&1 &
-    RENDERER_PID=$!
-
-    # Back-hold nuclear kill watchdog (same as graphical_waterfall)
-    local KILLWATCH_PID _wkevts="/tmp/specpine_wkevts.tmp"
-    local _wkdev="/dev/input/event0"
-    [ -e "$_wkdev" ] || _wkdev=$(ls /dev/input/event* 2>/dev/null | head -1)
-    : > "$_wkevts"
-    (
-        evtest "$_wkdev" 2>/dev/null | awk '
-            /type 1.*value 1/ && !/KEY_UP|KEY_DOWN|KEY_LEFT|KEY_RIGHT|\(BTN_EAST\)/ { print "PRESS";   fflush() }
-            /type 1.*value 0/ && !/KEY_UP|KEY_DOWN|KEY_LEFT|KEY_RIGHT|\(BTN_EAST\)/ { print "RELEASE"; fflush() }
-        ' >> "$_wkevts" &
-        _ep=$!
-        _rp="$RENDERER_PID"
-        _press_t=0
-        while kill -0 "$_rp" 2>/dev/null; do
-            if [ -s "$_wkevts" ]; then
-                _evts=$(cat "$_wkevts"); : > "$_wkevts"
-                case "$_evts" in
-                    *PRESS*RELEASE*|*RELEASE*) _press_t=0 ;;
-                    *PRESS*)
-                        [ "$_press_t" -eq 0 ] && _press_t=$(date +%s)
-                        ;;
-                esac
-            fi
-            if [ "$_press_t" -gt 0 ] && [ $(( $(date +%s) - _press_t )) -ge 2 ]; then
-                echo "[watchdog] Back held 2s -- nuking specpine" >> "$LOG_FILE"
-                kill -9 "$_rp" 2>/dev/null || true
-                pkill -9 -f spectools_waterfall 2>/dev/null || true
-                pkill -9 -f spectools_bridge    2>/dev/null || true
-                pkill -9 -f spectool_raw        2>/dev/null || true
-                _pp=$(pidof pineapple 2>/dev/null | awk '{print $1}')
-                [ -n "$_pp" ] && kill -CONT "$_pp" 2>/dev/null || true
-                break
-            fi
-            sleep 0.3
-        done
-        kill "$_ep" 2>/dev/null || true
-        rm -f "$_wkevts"
-    ) &
-    KILLWATCH_PID=$!
-
-    clear_dpad_evt
-    clear_screenshot_evt
-    local shot_n=0 _down_hold_start=""
-
-    local last_evt_size=-1 last_evt_growth stall_limit
-    last_evt_growth=$(date +%s)
-    stall_limit=$(( stall_timeout * 3 ))
-    [ "$stall_limit" -lt 15 ] && stall_limit=15
-
-    local _tick=0
-    while kill -0 "$RENDERER_PID" 2>/dev/null; do
-        _tick=$((_tick + 1))
-        check_dpad
+    # Process substitution keeps the while-loop in the parent shell so
+    # `break` propagates and total_scans / SESSION_DIR mutations stick.
+    while IFS= read -r wfline; do
         check_cancel
-        if is_btn_stopped; then
-            echo "[wf-ascii] stop -- killing renderer" >> "$LOG_FILE"
-            kill    "$RENDERER_PID" 2>/dev/null || true
-            kill -9 "$RENDERER_PID" 2>/dev/null || true
-            kill_stray_specpine_workers
-            pineapple_ensure_running
-            break
+        if is_btn_stopped; then break; fi
+        if is_btn_paused; then
+            LOG yellow "[paused] tap OK to resume"
+            while is_btn_paused; do
+                sleep 0.4
+                check_cancel
+                is_btn_stopped && break 2
+            done
+            LOG green "[resumed]"
         fi
-
-        local cur_evt_size
-        cur_evt_size=$(wc -c < "$EVENTS_FILE" 2>/dev/null || echo -1)
-        if [ "$cur_evt_size" != "$last_evt_size" ]; then
-            last_evt_size="$cur_evt_size"
-            last_evt_growth=$(date +%s)
-        elif [ $(( $(date +%s) - last_evt_growth )) -ge "$stall_limit" ]; then
-            LOG red "Feed stalled (${stall_limit}s) -- recovering"
-            stop_bridge
-            local _sb_stall_ret
-            start_bridge "$SESSION_DIR" "$current_band" "$RENDERER_PID"; _sb_stall_ret=$?
-            if [ "$_sb_stall_ret" -eq 2 ]; then
-                echo "stop" > "$BTN_EVT_FILE"
-                kill "$RENDERER_PID" 2>/dev/null || true
-                break
-            elif [ "$_sb_stall_ret" -eq 0 ]; then
-                LOG yellow "Feed restarted: ${current_band} GHz"
-                last_evt_size=-1
-                last_evt_growth=$(date +%s)
-            else
-                LOG red "Feed recovery failed -- stopping"
-                kill "$RENDERER_PID" 2>/dev/null || true
-                break
-            fi
-        fi
-
-        if [ -s "$DPAD_PENDING_FILE" ]; then
-            _down_hold_start=$(cat "$DPAD_PENDING_FILE" 2>/dev/null)
-            if [ -n "$_down_hold_start" ] && [ $(( $(date +%s) - _down_hold_start )) -ge 2 ]; then
-                : > "$DPAD_PENDING_FILE"
-                shot_n=$((shot_n+1))
-                local shot_path="${SESSION_DIR}/screenshot_$(date +%Y%m%d_%H%M%S)_${shot_n}.bmp"
-                if python3 "$FB_SCREENSHOT_BIN" "$shot_path" >> "$LOG_FILE" 2>&1; then
-                    kill -STOP "$RENDERER_PID" 2>/dev/null || true
-                    local _pp; _pp=$(pidof pineapple 2>/dev/null | awk '{print $1}')
-                    [ -n "$_pp" ] && kill -CONT "$_pp" 2>/dev/null || true
-                    LOG green "SCREENSHOT: ${shot_path##*/}"
-                    RINGTONE "Achievement" 2>/dev/null || true
-                    sleep 0.6
-                    [ -n "$_pp" ] && kill -STOP "$_pp" 2>/dev/null || true
-                    kill -CONT "$RENDERER_PID" 2>/dev/null || true
-                fi
-            fi
-        fi
-
-        sleep 0.15
-    done
-    wait "$RENDERER_PID" 2>/dev/null || true
-    RENDERER_PID=""
-    pineapple_ensure_running
+        # 5-tier color tags emitted by the renderer based on peak dBm.
+        # Untagged lines (headers, status) pass through with default color.
+        case "$wfline" in
+            R:*) LOG red    "${wfline#R:}" ;;
+            Y:*) LOG yellow "${wfline#Y:}" ;;
+            G:*) LOG green  "${wfline#G:}" ;;
+            C:*) LOG cyan   "${wfline#C:}" ;;
+            B:*) LOG blue   "${wfline#B:}" ;;
+            *)   LOG        "$wfline"      ;;
+        esac
+    done < <(python3 "$RENDERER_ASCII_BIN" \
+                --events-file "$EVENTS_FILE" \
+                --band "$current_band" \
+                --follow \
+                --poll-interval 0.05 \
+                2>/dev/null)
 
     stop_bridge
-    kill "$KILLWATCH_PID" 2>/dev/null || true
-    wait "$KILLWATCH_PID" 2>/dev/null || true
-    rm -f /tmp/specpine_wkevts.tmp
     killall evtest 2>/dev/null || true
     EVTEST_PID=""
     clear_btn_evt
-    clear_dpad_evt
-    clear_screenshot_evt
 
     if [ "$current_save_loot" = "true" ] && [ -f "$EVENTS_FILE" ]; then
         cp "$EVENTS_FILE" "${SESSION_DIR}/events.jsonl" 2>/dev/null || true
     fi
     mark_session_success "$SESSION_DIR" "text"
     led_safe R 0 G 0 B 128
-    LOG green "ASCII waterfall stopped"
+    LOG       "──────────────────────────────────────────"
+    LOG green "Waterfall stopped"
     total_scans=$((total_scans+1))
     show_menu_end_OK=2
 }

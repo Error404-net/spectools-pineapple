@@ -1,291 +1,168 @@
 #!/usr/bin/env python3
-"""ASCII block-glyph waterfall renderer for the Hak5 WiFi Pineapple Pager.
+"""Pager-optimized ASCII waterfall renderer for SpecTools bridge JSONL events.
 
-Writes colored block characters (░▒▓█) directly to /dev/fb0 with per-character
-dBm-based color, matching the graphical waterfall's gradient in a WarGames
-phosphor aesthetic. Reuses all framebuffer primitives from spectools_waterfall_fb.py.
+Outputs one LOG-compatible tagged line per sweep to stdout. The shell wrapper
+(text_waterfall() in funcs_scan.sh) reads each line and routes it to the
+appropriate LOG color command.
 
-Layout (480x222 logical landscape):
-  y =   0-27   Header bar (SPECPINE / freq info)
-  y =  28-201  Scrolling block-glyph waterfall (174px = 11 rows of 15px)
-  y = 202-221  Footer bar (controls hint)
+Line tag prefixes:
+  B:  → LOG blue    (peak dBm < -80 — noise floor)
+  C:  → LOG cyan    (peak dBm -80 to -70 — low signal)
+  G:  → LOG green   (peak dBm -70 to -60 — medium signal)
+  Y:  → LOG yellow  (peak dBm -60 to -50 — strong signal)
+  R:  → LOG red     (peak dBm > -50 — very strong / peak)
+  (no tag) → LOG default (headers, legends, status lines)
 """
 from __future__ import annotations
 
 import argparse
-import atexit
 import json
 import os
-import signal
 import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import spectools_waterfall_fb as wf
+LINE_WIDTH    = 50
+SPECTRUM_COLS = 42      # LINE_WIDTH - 2 (tag) - 2 pipes - 4 peak
+HEADER_EVERY  = 10      # print freq + scale header every N sweeps
 
-# ── Extra glyphs (same set as specpine_hud.py) ────────────────────────────────
-wf._GLYPHS.update({
-    'A': [0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
-    'E': [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F],
-    'F': [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10],
-    'G': [0x0F, 0x10, 0x10, 0x17, 0x11, 0x11, 0x0E],
-    'I': [0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E],
-    'N': [0x11, 0x19, 0x15, 0x15, 0x13, 0x11, 0x11],
-    'O': [0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
-    'R': [0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11],
-    'U': [0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
-    '/': [0x01, 0x02, 0x04, 0x08, 0x10, 0x00, 0x00],
-    ':': [0x00, 0x06, 0x06, 0x00, 0x06, 0x06, 0x00],
-    # Block shading characters (keyed by control chars to avoid collision)
-    '\x01': [0x15, 0x00, 0x15, 0x00, 0x15, 0x00, 0x15],  # ░ sparse checkerboard
-    '\x02': [0x1F, 0x00, 0x1F, 0x00, 0x1F, 0x00, 0x1F],  # ▒ horizontal bars
-    '\x03': [0x1F, 0x15, 0x1F, 0x15, 0x1F, 0x15, 0x1F],  # ▓ dense with gaps
-    '\x04': [0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F],  # █ solid block
-})
+# Block-shading glyphs (Unicode; ASCII fallback if locale not UTF-8)
+_DENSITY_UNICODE: list[tuple[float, str]] = [
+    (-88.0, " "),   # noise floor — invisible
+    (-78.0, "░"),   # very low
+    (-68.0, "▒"),   # low
+    (-55.0, "▓"),   # medium
+    (999.0, "█"),   # strong / peak
+]
+_DENSITY_ASCII: list[tuple[float, str]] = [
+    (-88.0, " "),
+    (-78.0, "."),
+    (-68.0, "-"),
+    (-55.0, "="),
+    (999.0, "#"),
+]
 
-# ── WarGames palette ──────────────────────────────────────────────────────────
-_BG    = wf.rgb565(  0,   8,   4)
-_BAR   = wf.rgb565(  0,  20,  10)
-_GREEN = wf.rgb565(  0, 220, 100)
-_DIM   = wf.rgb565(  0,  80,  40)
-_GRID  = wf.rgb565(  0,  35,  18)
-_AMBER = wf.rgb565(255, 180,   0)
+_SCALE_UNICODE = "[░<-78  ▒<-68  ▓<-55  █>-55   (dBm)]"
+_SCALE_ASCII   = "[.<-78  -<-68  =<-55  #>-55   (dBm)]"
 
-# ── Layout ────────────────────────────────────────────────────────────────────
-HEADER_H = 28
-FOOTER_H = 20
-WFALL_Y0 = HEADER_H                          # 28
-WFALL_Y1 = wf.IMG_H - FOOTER_H - 1          # 201
-WFALL_H  = WFALL_Y1 - WFALL_Y0 + 1          # 174
+# Wi-Fi channel centre frequencies (kHz) → display marker
+_CH_2G: dict[int, str] = {
+    2412000: "1", 2437000: "6", 2462000: ">",
+}
+_CH_5G: dict[int, str] = {
+    5180000: "a", 5200000: "b", 5220000: "c", 5240000: "d",
+    5745000: "e", 5765000: "f", 5785000: "g", 5805000: "h",
+}
 
-CHAR_SX = 11    # 10px glyph + 1px gap (2x scaled 5-wide glyph)
-CHAR_SY = 15    # 14px glyph + 1px gap (2x scaled 7-tall glyph)
-
-CHARS_WIDE   = wf.IMG_W // CHAR_SX           # 43
-ROWS_VISIBLE = WFALL_H  // CHAR_SY           # 11
-
-# ── Per-dBm → (block char, RGB565) levels ────────────────────────────────────
-# Visual progression: invisible → dim green dots → medium green bars →
-#                     bright green dense → amber solid
-_LEVELS: list[tuple[float, str, int]] = [
-    (-90.0, ' ',    wf.rgb565(  0,   8,   4)),  # noise floor: invisible
-    (-80.0, '\x01', wf.rgb565(  0,  40,  20)),  # very low: dim green dots
-    (-70.0, '\x01', wf.rgb565(  0,  90,  45)),  # low: medium dim green dots
-    (-60.0, '\x02', wf.rgb565(  0, 170,  75)),  # medium-low: cyan-green bars
-    (-50.0, '\x02', wf.rgb565(  0, 220, 100)),  # medium: bright green bars
-    (-38.0, '\x03', wf.rgb565(200, 200,   0)),  # strong: amber dense
-    (999.0, '\x04', wf.rgb565(255, 160,   0)),  # very strong: hot amber solid
+# 5-tier dBm → LOG tag mapping (based on row peak)
+_TAGS: list[tuple[float, str]] = [
+    (-80.0, "B:"),  # blue   — noise floor
+    (-70.0, "C:"),  # cyan   — low
+    (-60.0, "G:"),  # green  — medium
+    (-50.0, "Y:"),  # yellow — strong
+    (999.0, "R:"),  # red    — very strong
 ]
 
 
-def _dbm_to_char_color(dbm: float) -> tuple[str, int]:
-    for max_d, ch, col in _LEVELS:
-        if dbm <= max_d:
-            return ch, col
-    return _LEVELS[-1][1], _LEVELS[-1][2]
+def _unicode_ok() -> bool:
+    enc = getattr(sys.stdout, "encoding", None) or ""
+    if "utf" in enc.lower():
+        return True
+    for var in ("LC_ALL", "LC_CTYPE", "LANG"):
+        if "utf" in os.environ.get(var, "").lower():
+            return True
+    return False
 
 
-def _glyph2x(fb: bytearray, ch: str, cx: int, cy: int, color: int) -> None:
-    """Render glyph at 2× scale: each pixel → 2×2 block."""
-    bits_list = wf._GLYPHS.get(ch, wf._GLYPHS[' '])
-    for row, bits in enumerate(bits_list):
-        for col in range(5):
-            if bits & (1 << (4 - col)):
-                px, py = cx + col * 2, cy + row * 2
-                wf._put(fb, px,     py,     color)
-                wf._put(fb, px + 1, py,     color)
-                wf._put(fb, px,     py + 1, color)
-                wf._put(fb, px + 1, py + 1, color)
+def _bin_char(dbm: float, density: list[tuple[float, str]]) -> str:
+    for threshold, ch in density:
+        if dbm <= threshold:
+            return ch
+    return density[-1][1]
 
 
-def _text2x(fb: bytearray, text: str, x: int, y: int, color: int) -> None:
-    for i, ch in enumerate(text):
-        _glyph2x(fb, ch.upper(), x + i * 12, y, color)
+def _peak_tag(peak: float) -> str:
+    for threshold, tag in _TAGS:
+        if peak <= threshold:
+            return tag
+    return _TAGS[-1][1]
 
 
-def _draw_static(fb: bytearray, freq_start_khz: int | None,
-                 freq_end_khz: int | None, band: str) -> None:
-    """Draw WarGames-style header/footer; leave waterfall area untouched."""
-    # Background + grid
-    wf._fill(fb, 0, 0, wf.IMG_W, wf.IMG_H, _BG)
-    for gy in range(0, wf.IMG_H, 24):
-        wf._fill(fb, 0, gy, wf.IMG_W, 1, _GRID)
-
-    # 1-px border
-    wf._fill(fb, 0, 0, wf.IMG_W, 1, _DIM)
-    wf._fill(fb, 0, wf.IMG_H - 1, wf.IMG_W, 1, _DIM)
-
-    # Header bar
-    wf._fill(fb, 0, 0, wf.IMG_W, HEADER_H, _BAR)
-    _text2x(fb, "SPECPINE", 8, 7, _AMBER)
-    freq_label = ""
-    if freq_start_khz and freq_end_khz:
-        freq_label = f"{freq_start_khz // 1000}-{freq_end_khz // 1000}MHZ"
-    elif band:
-        freq_label = f"{band}GHZ"
-    if freq_label:
-        _text2x(fb, freq_label, wf.IMG_W - len(freq_label) * 12 - 8, 7, _DIM)
-    wf._hline(fb, 0, wf.IMG_W - 1, HEADER_H - 1, _GREEN)
-    wf._hline(fb, 0, wf.IMG_W - 1, HEADER_H - 2, _GREEN)
-
-    # Waterfall area: solid background
-    wf._fill(fb, 0, WFALL_Y0, wf.IMG_W, WFALL_H, _BG)
-
-    # Footer bar
-    wf._fill(fb, 0, WFALL_Y1 + 1, wf.IMG_W, FOOTER_H, _BAR)
-    wf._hline(fb, 0, wf.IMG_W - 1, WFALL_Y1 + 1, _GREEN)
-    wf._hline(fb, 0, wf.IMG_W - 1, WFALL_Y1 + 2, _GREEN)
-    hint = "HOLD OK:STOP  HOLD BACK:EXIT"
-    _text2x(fb, hint, (wf.IMG_W - len(hint) * 12) // 2, WFALL_Y1 + 5, _DIM)
-
-
-def _draw_status(fb: bytearray, sweep_count: int, peak: float | None) -> None:
-    """Update header right-side info (sweep count + peak dBm)."""
-    wf._fill(fb, wf.IMG_W // 2, 0, wf.IMG_W // 2, HEADER_H - 2, _BAR)
-    if sweep_count > 0:
-        info = f"SW:{sweep_count}"
-        if peak is not None:
-            info += f"  PK:{int(round(peak))}DB"
-        _text2x(fb, info, wf.IMG_W - len(info) * 12 - 8, 7, _DIM)
-
-
-def _scroll_up(fb: bytearray) -> None:
-    """Shift the waterfall area up by CHAR_SY logical pixels (insert new row at bottom).
-
-    In the physical FB (portrait 222×480), logical y maps to physical col via
-    phys_col = 221 - ly. Moving data UP (ly decreasing) means physical col
-    increases by CHAR_SY. We copy the existing waterfall data rightward in
-    physical col space, leaving the lowest CHAR_SY physical cols free for the
-    new row.
-
-    Physical waterfall bounds:
-      base_col = 221 - WFALL_Y1 = 20  (newest row, bottom of logical display)
-      top_col  = 221 - WFALL_Y0 = 193 (oldest row, top of logical display)
-
-    n_keep cols: WFALL_H - CHAR_SY = 159 — the surviving rows after one shift.
-    Source: phys cols [base_col .. base_col + n_keep - 1] = [20 .. 178]
-    Dest:   phys cols [base_col + CHAR_SY .. base_col + CHAR_SY + n_keep - 1] = [35 .. 193]
-    """
-    base_col = 221 - WFALL_Y1    # 20
-    n_keep   = WFALL_H - CHAR_SY  # 159
-    stride   = wf.FB_W            # 222 physical columns per logical row
-    for lx in range(wf.IMG_W):
-        off = (lx * stride + base_col) * 2
-        n   = n_keep * 2
-        fb[off + CHAR_SY * 2 : off + CHAR_SY * 2 + n] = fb[off : off + n]
-
-
-def _draw_new_row(fb: bytearray, sampled: list[float]) -> None:
-    """Clear the bottom CHAR_SY rows and render the new sweep's glyph row."""
-    new_y0 = WFALL_Y1 - CHAR_SY + 1   # 187
-    wf._fill(fb, 0, new_y0, wf.IMG_W, CHAR_SY, _BG)
-    for i, dbm in enumerate(sampled):
-        ch, col = _dbm_to_char_color(dbm)
-        if ch == ' ':
-            continue
-        cx = 1 + i * CHAR_SX
-        if cx + 10 > wf.IMG_W:
-            break
-        _glyph2x(fb, ch, cx, new_y0, col)
-
-
-def _resample(bins: list[float], n: int) -> list[float]:
-    if not bins:
-        return [float('-inf')] * n
-    nb = len(bins)
-    if nb == n:
+def resample(bins: list[float], width: int) -> list[float]:
+    n = len(bins)
+    if n == width:
         return list(bins)
-    chunk = nb / n
-    if nb > n:
+    chunk = n / width
+    if n > width:
         return [max(bins[int(i * chunk) : max(int((i + 1) * chunk), int(i * chunk) + 1)])
-                for i in range(n)]
-    return [bins[min(int(i * nb / n), nb - 1)] for i in range(n)]
+                for i in range(width)]
+    return [bins[min(int(i * n / width), n - 1)] for i in range(width)]
+
+
+def freq_header(freq_start_khz: int | None, freq_end_khz: int | None,
+                cols: int = SPECTRUM_COLS) -> str:
+    label_l = f"{freq_start_khz // 1000}MHz" if freq_start_khz else "?MHz"
+    label_r = f"{freq_end_khz // 1000}MHz" if freq_end_khz else "?MHz"
+    buf = ["-"] * cols
+    for i, c in enumerate(label_l[:cols]):
+        buf[i] = c
+    for i, c in enumerate(label_r):
+        pos = cols - len(label_r) + i
+        if 0 <= pos < cols:
+            buf[pos] = c
+    if freq_start_khz and freq_end_khz:
+        span = freq_end_khz - freq_start_khz
+        ch_map = _CH_2G if freq_start_khz < 3_000_000 else _CH_5G
+        for freq_khz, mark in ch_map.items():
+            if freq_start_khz <= freq_khz <= freq_end_khz and span > 0:
+                pos = int((freq_khz - freq_start_khz) / span * cols)
+                if 0 <= pos < cols and buf[pos] == "-":
+                    buf[pos] = mark
+    return f"[{''.join(buf)[:cols].ljust(cols)}]"
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description="Pager ASCII block-glyph waterfall")
+    p = argparse.ArgumentParser(description="Pager ASCII waterfall renderer")
     p.add_argument("--events-file", default="/tmp/spectools_bridge_events.jsonl")
     p.add_argument("--follow", action="store_true")
     p.add_argument("--poll-interval", type=float, default=0.05)
-    p.add_argument("--fps",  type=int, default=6)
-    p.add_argument("--btn-file", default="/tmp/specpine_btn_evt")
-    p.add_argument("--no-ui-stop", action="store_true")
+    p.add_argument("--band", default="", help="Band label for header (e.g. 2.4)")
+    p.add_argument("--unicode", action="store_true", default=None)
+    p.add_argument("--no-unicode", dest="unicode", action="store_false")
     args = p.parse_args(argv)
 
-    running = [True]
+    use_unicode = _unicode_ok() if args.unicode is None else args.unicode
+    density  = _DENSITY_UNICODE if use_unicode else _DENSITY_ASCII
+    scale_ln = (_SCALE_UNICODE  if use_unicode else _SCALE_ASCII)[:LINE_WIDTH]
 
-    def _stop(*_):
-        running[0] = False
-        if not args.no_ui_stop:
-            wf.pineapple_cont()
-
-    signal.signal(signal.SIGINT,  _stop)
-    signal.signal(signal.SIGTERM, _stop)
-
-    if not args.no_ui_stop:
-        wf.pineapple_stop()
-        atexit.register(wf.pineapple_cont)
-
-    fb = bytearray(wf.FB_W * wf.FB_H * 2)
-
-    def flush() -> None:
-        try:
-            with open(wf.FB_PATH, "r+b", buffering=0) as dev:
-                dev.seek(0)
-                dev.write(fb)
-        except OSError as exc:
-            print(f"[pager] fb write: {exc}", file=sys.stderr, flush=True)
-
-    btn_path = Path(args.btn_file)
     events_path = Path(args.events_file)
-
+    sweep_count = 0
     freq_start: int | None = None
     freq_end:   int | None = None
-    band = ""
-    sweep_count = 0
-    peak: float | None = None
-    frame_interval = 1.0 / max(args.fps, 1)
-    last_draw = 0.0
-    dirty = False
+    last_header_at = -HEADER_EVERY
 
-    _draw_static(fb, freq_start, freq_end, band)
-    flush()
+    def emit(line: str) -> None:
+        sys.stdout.write(line[:LINE_WIDTH] + "\n")
+        sys.stdout.flush()
+
+    # ── Opening header ────────────────────────────────────────────────────────
+    band_label = f"  {args.band}GHz" if args.band else ""
+    emit(f"── SPECPINE ASCII WATERFALL{band_label} ──")
+    emit(scale_ln)
+    emit("tap OK=pause  hold OK=stop")
 
     if not events_path.exists():
-        _text2x(fb, "WAITING FOR DEVICE...", 8, WFALL_Y0 + 8, _DIM)
-        flush()
-        while not events_path.exists() and running[0]:
-            # Check for stop via btn_file
-            try:
-                if "stop" in btn_path.read_text():
-                    running[0] = False
-            except OSError:
-                pass
+        emit("Waiting for device...")
+        while not events_path.exists():
             time.sleep(0.5)
-
-    if not running[0]:
-        return 0
+        emit("Device connected.")
 
     with events_path.open("r", encoding="utf-8") as fh:
-        while running[0]:
+        while True:
             raw = fh.readline()
             if not raw:
                 if args.follow:
                     time.sleep(args.poll_interval)
-                    # Check stop flag
-                    try:
-                        if "stop" in btn_path.read_text():
-                            running[0] = False
-                            break
-                    except OSError:
-                        pass
-                    now = time.time()
-                    if dirty and now - last_draw >= frame_interval:
-                        _draw_status(fb, sweep_count, peak)
-                        flush()
-                        last_draw = now
-                        dirty = False
                     continue
                 break
 
@@ -304,8 +181,6 @@ def main(argv: list[str] | None = None) -> int:
                     freq_start = evt["freq_start_khz"]
                 if evt.get("freq_end_khz") is not None:
                     freq_end = evt["freq_end_khz"]
-                _draw_static(fb, freq_start, freq_end, band)
-                dirty = True
 
             elif etype == "sweep":
                 if evt.get("freq_start_khz") is not None:
@@ -314,26 +189,29 @@ def main(argv: list[str] | None = None) -> int:
                     freq_end = evt["freq_end_khz"]
 
                 bins: list[float] = evt.get("rssi_bins", [])
-                if bins:
-                    sampled = _resample(bins, CHARS_WIDE)
-                    _scroll_up(fb)
-                    _draw_new_row(fb, sampled)
-                    sweep_count += 1
-                    peak = max(bins)
-                    dirty = True
+                if not bins:
+                    continue
+
+                if sweep_count - last_header_at >= HEADER_EVERY:
+                    emit(freq_header(freq_start, freq_end))
+                    emit(scale_ln)
+                    last_header_at = sweep_count
+
+                sampled = resample(bins, SPECTRUM_COLS)
+                row  = "".join(_bin_char(v, density) for v in sampled)
+                peak = max(bins)
+                tag  = _peak_tag(peak)
+                emit(f"{tag}|{row}|{int(round(peak)):4d}")
+                sweep_count += 1
 
             elif etype == "error":
-                dirty = True
+                msg = evt.get("message", "unknown error")
+                emit(f"ERR:{msg}"[:LINE_WIDTH])
 
-            now = time.time()
-            if dirty and now - last_draw >= frame_interval:
-                _draw_status(fb, sweep_count, peak)
-                flush()
-                last_draw = now
-                dirty = False
+            elif etype == "status":
+                if evt.get("level") == "warning":
+                    emit(f"[!]{evt.get('message', '')}"[:LINE_WIDTH])
 
-    if not args.no_ui_stop:
-        wf.pineapple_cont()
     return 0
 
 
