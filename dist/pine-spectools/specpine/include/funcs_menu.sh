@@ -138,7 +138,7 @@ main_menu_hud() {
 main_menu_legacy() {
     [ "$mute" = "false" ] && led_safe MAGENTA
 
-    local items=( "2.4GHz Waterfall" "5GHz Waterfall" "Settings" )
+    local items=( "2.4GHz Waterfall" "5GHz Waterfall" "NFO" )
     local pick_str="\"SpecPine - Main Menu\""
     local i
     LOG blue "── SpecPine v${APP_VERSION} ──"
@@ -151,428 +151,58 @@ main_menu_legacy() {
     case "$resp" in
         "2.4GHz Waterfall")  selnum=2 ;;
         "5GHz Waterfall")    selnum=3 ;;
-        "Settings")          selnum=7 ;;
+        "NFO")               selnum=7 ;;
         *)                   selnum=-1 ;;   # Back/cancel → payload.sh prompts to exit
     esac
 }
 
-# ── Install / Repair / Uninstall sub-menu (OPTIONAL — system-wide install) ─
-sub_menu_install() {
-    while true; do
-        show_ansi install
-        LOG blue "── Install / Repair / Uninstall ──"
-        LOG       "SpecPine bundles its own spectool_raw."
-        LOG       "Install only if you also want it on PATH"
-        LOG       "for other tools at /opt/spectools."
-        if [ -x "${INSTALL_BIN}/spectool_raw" ]; then
-            LOG green "System install : present at /opt/spectools"
+# ── NFO screen ────────────────────────────────────────────────────────────
+sub_menu_nfo() {
+    local wispy_line freq_line mute_val noloot_val
+
+    if [ "$WISPY_PRESENT" = "true" ]; then
+        wispy_line="${WISPY_DEVICE_NAME:-Wi-Spy DBx}"
+        if [ -n "$FREQ_START_KHZ" ] && [ -n "$FREQ_END_KHZ" ]; then
+            freq_line="$(( FREQ_START_KHZ / 1000 ))-$(( FREQ_END_KHZ / 1000 )) MHz"
         else
-            LOG       "System install : not present"
+            freq_line="?"
         fi
-        local resp
-        resp=$(LIST_PICKER "Install Menu" "Install to /opt" "Repair" "Uninstall" "Back")
-        case "$resp" in
-            "Install to /opt") install_spectools;   return ;;
-            "Repair")          repair_spectools;    return ;;
-            "Uninstall")       uninstall_spectools; return ;;
-            *)                 return ;;
-        esac
-    done
-}
-
-# ── Settings sub-menu ─────────────────────────────────────────────────────
-sub_menu_settings() {
-    while true; do
-        settings_check
-        show_ansi settings
-        LOG blue "── Settings ──"
-        LOG "Stall: ${stall_timeout}s   Restart: ${max_restarts}"
-        LOG "Audio: ${mute_disp}   Loot: ${noloot_disp}"
-        WAIT_FOR_BUTTON_PRESS A
-        local resp
-        resp=$(LIST_PICKER "Settings" \
-            "Status" \
-            "Stall Timeout" "Max Restarts" \
-            "Mute" "No-loot Mode" \
-            "Skip Ringtone Check" \
-            "Theme" \
-            "Diagnostics" \
-            "About" \
-            "Reset to Defaults" "Back")
-        case "$resp" in
-            "Status")              status_display ;;
-            "Stall Timeout")       setting_stall_timeout ;;
-            "Max Restarts")        setting_max_restarts ;;
-            "Mute")                setting_mute ;;
-            "No-loot Mode")        setting_noloot ;;
-            "Skip Ringtone Check") setting_skip_ringtones ;;
-            "Theme")               sub_menu_theme ;;
-            "Diagnostics")         sub_menu_diagnostics ;;
-            "About")               sub_menu_about ;;
-            "Reset to Defaults")   setting_reset_defaults ;;
-            *)                     return ;;
-        esac
-        config_backup
-    done
-}
-
-# ── Theme submenu ─────────────────────────────────────────────────────────────
-# Detects the active theme via the /lib/pager/themes/wargames symlink target,
-# then offers Install / Restore.  The actual heavy lifting is in
-# payloads/specpine/bin/specpine_theme_install.py (bundled in the ZIP).
-sub_menu_theme() {
-    local theme_dir="/lib/pager/themes"
-    local theme_script="${PAYLOAD_ROOT}/bin/specpine_theme_install.py"
-
-    while true; do
-        # Detect current state each loop iteration
-        local sp_status
-        if [ -d "${theme_dir}/specpine" ] && [ ! -L "${theme_dir}/specpine" ]; then
-            sp_status="installed"
-        else
-            sp_status="not installed"
-        fi
-
-        LOG blue "── Pager UI Theme ──"
-        LOG ""
-        LOG cyan "SpecPine theme: teal/cyan accent"
-        LOG "Both themes coexist — switch via:"
-        LOG "Settings → Display → Theme"
-        LOG ""
-        LOG "SpecPine: ${sp_status}"
-        WAIT_FOR_BUTTON_PRESS A
-
-        local r
-        r=$(LIST_PICKER "Theme" \
-            "Install SpecPine Theme" \
-            "Remove SpecPine Theme" \
-            "Theme Status" \
-            "Back")
-        case "$r" in
-            "Install SpecPine Theme")
-                if [ ! -f "$theme_script" ]; then
-                    ERROR_DIALOG "theme installer not found — redeploy the ZIP"
-                    continue
-                fi
-                LOG yellow "Installing SpecPine theme …"
-                LOG "Clones wargames, recolours to teal,"
-                LOG "then restarts the pager service."
-                LOG "Screen will go dark briefly."
-                WAIT_FOR_BUTTON_PRESS A
-                local out ec
-                out=$(python3 "$theme_script" 2>&1); ec=$?
-                if [ "$ec" -eq 0 ]; then
-                    LOG green "SpecPine installed."
-                    LOG green "Use Settings → Display → Theme"
-                    LOG green "to switch to it."
-                else
-                    ERROR_DIALOG "Install failed (rc=${ec}) — see LOG"
-                    LOG red "$out"
-                fi
-                ;;
-            "Remove SpecPine Theme")
-                if [ ! -f "$theme_script" ]; then
-                    ERROR_DIALOG "theme installer not found — redeploy the ZIP"
-                    continue
-                fi
-                LOG yellow "Removing SpecPine theme …"
-                WAIT_FOR_BUTTON_PRESS A
-                local out2 ec2
-                out2=$(python3 "$theme_script" --remove 2>&1); ec2=$?
-                if [ "$ec2" -eq 0 ]; then
-                    LOG green "SpecPine theme removed."
-                else
-                    ERROR_DIALOG "Remove failed (rc=${ec2}) — see LOG"
-                    LOG red "$out2"
-                fi
-                ;;
-            "Theme Status")
-                local st
-                st=$(python3 "$theme_script" --status 2>&1)
-                LOG blue "── Theme Status ──"
-                LOG "$st"
-                WAIT_FOR_BUTTON_PRESS A
-                ;;
-            *)
-                return ;;
-        esac
-    done
-}
-
-# ── Diagnostics submenu — exercises the "needs UI testing" items ──────────
-sub_menu_diagnostics() {
-    while true; do
-        LOG blue "── Diagnostics ──"
-        local r
-        r=$(LIST_PICKER "Diagnostics" \
-            "Test Button Watcher" \
-            "Test Framebuffer" \
-            "Test LIST_PICKER" \
-            "Test Settings Persist" \
-            "Test Bridge Dry-run" \
-            "Back")
-        case "$r" in
-            "Test Button Watcher")  diag_test_button_watcher ;;
-            "Test Framebuffer")     diag_test_framebuffer ;;
-            "Test LIST_PICKER")     diag_test_list_picker ;;
-            "Test Settings Persist") diag_test_settings_persist ;;
-            "Test Bridge Dry-run")  diag_test_bridge_dryrun ;;
-            *)                      return ;;
-        esac
-    done
-}
-
-
-diag_test_button_watcher() {
-    LOG blue "── Button Watcher Test ──"
-    LOG "Tap OK once, then long-press OK ≥0.8s,"
-    LOG "then press Back to finish."
-    start_evtest
-    local seen_pause=0 seen_stop=0 deadline
-    deadline=$(( $(date +%s) + 20 ))
-    while [ "$(date +%s)" -lt "$deadline" ]; do
-        check_cancel
-        if is_btn_paused && [ "$seen_pause" -eq 0 ]; then
-            LOG green "  ✓ pause event detected"
-            seen_pause=1
-            clear_btn_evt
-        fi
-        if is_btn_stopped; then
-            LOG green "  ✓ stop event detected"
-            seen_stop=1
-            break
-        fi
-        sleep 0.3
-    done
-    killall evtest 2>/dev/null || true
-    EVTEST_PID=""
-    clear_btn_evt
-    [ "$seen_pause" -eq 0 ] && LOG yellow "  ✗ no pause event (try tapping OK faster)"
-    [ "$seen_stop"  -eq 0 ] && LOG yellow "  ✗ no stop event (try holding OK ≥0.8s)"
-    [ "$seen_pause" -eq 1 ] && [ "$seen_stop" -eq 1 ] && LOG green "Button watcher: OK"
-    show_menu_end_OK=2
-}
-
-diag_test_framebuffer() {
-    LOG blue "── Framebuffer Test ──"
-    if [ ! -e /dev/fb0 ]; then
-        LOG red "  /dev/fb0 not present — skipped"
-        show_menu_end_OK=2
-        return
-    fi
-    if [ ! -x "${PAYLOAD_ROOT}/bin/specpine_splash.py" ]; then
-        LOG yellow "  splash binary missing — skipped"
-        show_menu_end_OK=2
-        return
-    fi
-    LOG "  Playing 2.5s splash on /dev/fb0..."
-    python3 "${PAYLOAD_ROOT}/bin/specpine_splash.py" 2>>"$LOG_FILE"
-    sleep 0.3
-    [ -e "$VTCON" ] && echo 1 > "$VTCON" 2>/dev/null || true
-    LOG green "  Splash complete; LOG view should be restored"
-    show_menu_end_OK=2
-}
-
-diag_test_list_picker() {
-    LOG blue "── LIST_PICKER Test ──"
-    local r
-    r=$(LIST_PICKER "Pick anything" "Alpha" "Bravo" "Charlie")
-    if [ -n "$r" ]; then
-        LOG green "  Got response: '$r'"
     else
-        LOG yellow "  Empty response (cancelled?)"
+        wispy_line="--"
+        freq_line="--"
     fi
-    show_menu_end_OK=2
-}
+    [ "$mute"   = "true" ] && mute_val="on"  || mute_val="off"
+    [ "$noloot" = "true" ] && noloot_val="on" || noloot_val="off"
 
-diag_test_settings_persist() {
-    LOG blue "── Settings Persist Test ──"
-    silent_backup=1
-    config_backup
-    local key val miss=0
-    for key in default_band stall_timeout max_restarts \
-               mute noloot skip_ask_ringtones selnum_main \
-               total_scans app_version; do
-        val=$(PAYLOAD_GET_CONFIG "$CONFIG_NS" "$key" 2>/dev/null)
-        if [ -z "$val" ]; then
-            LOG red "  ✗ ${key}: empty"
-            miss=$((miss+1))
-        else
-            LOG green "  ✓ ${key} = ${val}"
-        fi
-    done
-    [ "$miss" -eq 0 ] && LOG green "All keys persist OK" || LOG red "${miss} keys missing"
-    show_menu_end_OK=2
-}
-
-diag_test_bridge_dryrun() {
-    LOG blue "── Bridge Dry-run ──"
-    if [ ! -x "$SPECTOOL_BIN" ]; then
-        LOG red "  spectool_raw not installed — Run Install first"
-        show_menu_end_OK=2
-        return
-    fi
-    local d="/tmp/specpine_diag_$(date +%s)"
-    mkdir -p "$d"
-    rm -f "$EVENTS_FILE"
-    LOG "  Spawning bridge for 3 s (will likely fail without Wi-Spy)..."
-    if start_bridge "$d"; then
-        LOG green "  Bridge stayed up for 6 s — Wi-Spy probably present"
-        sleep 3
+    LOG cyan   " ░░░░░░░░░░░░░░░░░░░░░░░░░░"
+    LOG yellow "      S P E C P I N E"
+    LOG cyan   "   RF SPECTRUM ANALYZER"
+    LOG        "   Hak5 Pineapple Pager"
+    LOG yellow "      v${APP_VERSION} // error404"
+    LOG cyan   " ░░░░░░░░░░░░░░░░░░░░░░░░░░"
+    LOG cyan   " ──────────────────────────"
+    LOG blue   "  [ HARDWARE ]"
+    if [ "$WISPY_PRESENT" = "true" ]; then
+        LOG green  "  Wi-Spy .. ONLINE"
     else
-        LOG yellow "  Bridge exited as expected (no Wi-Spy or stall)"
-        LOG "  Reason: ${BRIDGE_FAIL_REASON:-(none captured)}"
+        LOG red    "  Wi-Spy .. NOT FOUND"
     fi
-    stop_bridge
-    LOG "  Events captured:"
-    if [ -s "$EVENTS_FILE" ]; then
-        local n
-        n=$(wc -l < "$EVENTS_FILE")
-        LOG green "    ${n} JSONL lines in ${EVENTS_FILE}"
-        head -3 "$EVENTS_FILE" | while IFS= read -r l; do LOG "    ${l:0:80}"; done
-    else
-        LOG yellow "    (no events file)"
-    fi
-    rm -rf "$d"
+    LOG        "  Device .. ${wispy_line}"
+    LOG        "  Range ... ${freq_line}"
+    LOG cyan   " ──────────────────────────"
+    LOG blue   "  [ CONFIG ]"
+    LOG        "  Stall ....... ${stall_timeout}s"
+    LOG        "  Restarts .... ${max_restarts}"
+    LOG        "  Mute ........ ${mute_val}"
+    LOG        "  No-loot ..... ${noloot_val}"
+    LOG cyan   " ──────────────────────────"
+    LOG yellow "  [ GREETZ ]"
+    LOG        "  :: hak5 community"
+    LOG        "  :: spectools / caljorden"
+    LOG        "  :: spectools / dragorn"
+    LOG        "  :: ArmoredPixie"
+    LOG cyan   " ░░░░░░░░░░░░░░░░░░░░░░░░░░"
     show_menu_end_OK=2
-}
-
-setting_stall_timeout() {
-    local r; r=$(NUMBER_PICKER "Stall Timeout (s)" "$stall_timeout")
-    [ -n "$r" ] && stall_timeout="$r"
-}
-setting_max_restarts() {
-    local r; r=$(NUMBER_PICKER "Max Restarts" "$max_restarts")
-    [ -n "$r" ] && max_restarts="$r"
-}
-setting_mute() {
-    if [ "$mute" = "true" ]; then mute="false"; else mute="true"; fi
-    LOG green "Mute: ${mute}"
-}
-setting_noloot() {
-    if [ "$noloot" = "true" ]; then noloot="false"; else noloot="true"; fi
-    LOG green "No-loot: ${noloot}"
-}
-setting_skip_ringtones() {
-    if [ "$skip_ask_ringtones" -eq 1 ]; then skip_ask_ringtones=0; else skip_ask_ringtones=1; fi
-    LOG green "Skip ringtone check: ${skip_ask_ringtones}"
-}
-setting_reset_defaults() {
-    local resp
-    resp=$(CONFIRMATION_DIALOG "Reset all settings to defaults?")
-    [ "$resp" != "$DUCKYSCRIPT_USER_CONFIRMED" ] && return 0
-    default_band="2.4"
-    stall_timeout=8
-    max_restarts=5
-    mute="false"
-    noloot="false"
-    skip_ask_ringtones=0
-    LOG green "Defaults restored"
-}
-
-# ── About ─────────────────────────────────────────────────────────────────
-sub_menu_about() {
-    show_ansi about
-    LOG blue   "── About SpecPine ──"
-    LOG green  "SpecPine v${APP_VERSION}"
-    LOG       "RF spectrum analyser for the Hak5 Pager"
-    LOG       "Backend: spectool_raw + Wi-Spy DBx"
-    LOG       "Frontend: ASCII LOG + RGB565 framebuffer"
-    LOG cyan  "------------- credits -------------------------"
-    LOG       "BluePine (cncartist) — UX patterns, ringtones"
-    LOG       "Kismet/spectools authors — driver code"
-    LOG       "Error404-net — Pager port + SpecPine bundle"
-    LOG       "WarGames (1983) — title-card inspiration"
-    LOG blue   "================================================"
-    show_menu_end_OK=2
-}
-
-# ── Saved sessions browser ────────────────────────────────────────────────
-sub_menu_sessions() {
-    show_ansi sessions
-    while true; do
-        local entries=()
-        local d
-        for d in "$LOOT_ROOT"/session_* "$TMP_LOOT_ROOT"/session_*; do
-            [ -d "$d" ] && entries+=( "$(basename "$d")" )
-        done
-        if [ "${#entries[@]}" -eq 0 ]; then
-            LOG yellow "No saved sessions yet"
-            show_menu_end_OK=2
-            return 0
-        fi
-        local pick_str="\"Saved Sessions\""
-        for e in "${entries[@]}"; do pick_str="${pick_str} \"${e}\""; done
-        pick_str="${pick_str} \"Back\""
-        WAIT_FOR_BUTTON_PRESS A
-        local resp
-        resp=$(eval "LIST_PICKER ${pick_str}")
-        [ "$resp" = "Back" ] || [ -z "$resp" ] && return 0
-
-        local picked=""
-        for e in "${entries[@]}"; do
-            [ "$e" = "$resp" ] && picked="$e" && break
-        done
-        [ -z "$picked" ] && return 0
-
-        local target=""
-        [ -d "${LOOT_ROOT}/${picked}" ]     && target="${LOOT_ROOT}/${picked}"
-        [ -d "${TMP_LOOT_ROOT}/${picked}" ] && target="${TMP_LOOT_ROOT}/${picked}"
-
-        local action
-        action=$(LIST_PICKER "$picked" "View Summary" "Replay" "Delete" "Back")
-        case "$action" in
-            "View Summary") session_view_summary "$target" ;;
-            "Replay")       session_replay "$target" ;;
-            "Delete")       session_delete "$target" ;;
-            *) ;;
-        esac
-    done
-}
-
-session_view_summary() {
-    local d="$1"
-    LOG blue "------- $(basename "$d") -------"
-    if [ -f "${d}/meta.json" ]; then
-        while IFS= read -r line; do LOG "$line"; done < "${d}/meta.json"
-    else
-        LOG yellow "(no meta.json)"
-    fi
-    if [ -f "${d}/sweep_summary.csv" ]; then
-        local rows
-        rows=$(wc -l < "${d}/sweep_summary.csv" 2>/dev/null)
-        LOG cyan "${rows} rows in sweep_summary.csv"
-    fi
-    if [ -f "${d}/anomaly_log.txt" ]; then
-        local hits
-        hits=$(grep -c '^ANOMALY' "${d}/anomaly_log.txt" 2>/dev/null || echo 0)
-        LOG cyan "${hits} anomaly entries"
-    fi
-    LOG blue "----------------------------------"
-    show_menu_end_OK=2
-}
-
-session_replay() {
-    local d="$1"
-    if [ ! -f "${d}/events.jsonl" ]; then
-        LOG yellow "No events.jsonl in this session"
-        show_menu_end_OK=2
-        return 0
-    fi
-    LOG green "Replaying ASCII waterfall (Back to stop)"
-    python3 "$RENDERER_ASCII_BIN" --events-file "${d}/events.jsonl" 2>/dev/null | \
-        while IFS= read -r line; do LOG green "$line"; done
-    show_menu_end_OK=2
-}
-
-session_delete() {
-    local d="$1"
-    local resp
-    resp=$(CONFIRMATION_DIALOG "Delete $(basename "$d")?")
-    if [ "$resp" = "$DUCKYSCRIPT_USER_CONFIRMED" ]; then
-        rm -rf "$d"
-        LOG green "Deleted"
-    fi
 }
 
 # ── Pre-scan options dialog ───────────────────────────────────────────────

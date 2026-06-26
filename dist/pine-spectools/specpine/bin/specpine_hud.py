@@ -388,7 +388,7 @@ def main(argv: list[str] | None = None) -> int:
     items: list[tuple[str, int]] = [
         ("2.4GHZ WATERFALL", 2),
         ("5GHZ WATERFALL",   3),
-        ("SYS/CONFIG",       7),
+        ("NFO",              7),
     ]
 
     # Belt-and-suspenders, same pattern as spectools_waterfall_fb.py: any

@@ -229,7 +229,7 @@ while true; do
     case "$main_option" in
         2)  if pre_scan_dialog; then current_band="2.4"; graphical_waterfall; fi ;;
         3)  if pre_scan_dialog; then current_band="5";   graphical_waterfall; fi ;;
-        7)  sub_menu_settings ;;
+        7)  sub_menu_nfo ;;
         0)
             # selnum=0 set by HUD on Back-hold (EXIT_PRECONFIRMED=1) or by
             # legacy Back-press path below — always pre-confirmed by the time
